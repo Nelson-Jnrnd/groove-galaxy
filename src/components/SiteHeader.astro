@@ -1,0 +1,26 @@
+---
+// Reads as the same person's work as the personal site (REQ-28), and always
+// offers a way back to it (REQ-29) — including when Groove Galaxy is being
+// viewed inside an iframe on /music, where the links open the top window.
+const SITE = "https://nelson-j.ch";
+---
+
+<header class="site-header">
+  <div class="inner">
+    <a
+      class="brand"
+      href={SITE}
+      target="_top"
+      aria-label="Nelson Jeanrenaud, home"
+    >
+      <span class="brand__mark" aria-hidden="true"></span>
+      <span class="brand__name">Nelson Jeanrenaud</span>
+      <span class="brand__sep" aria-hidden="true">/</span>
+      <span class="brand__page">Groove Galaxy</span>
+    </a>
+    <nav class="nav" aria-label="Back to the personal site">
+      <a href={`${SITE}/music`} target="_top">← music</a>
+      <a href={SITE} target="_top">home</a>
+    </nav>
+  </div>
+</header>

@@ -1,0 +1,54 @@
+---
+import "../styles/global.css";
+
+interface Props {
+  title?: string;
+  description?: string;
+}
+
+const {
+  title = "Groove Galaxy · Nelson Jeanrenaud",
+  description =
+    "An explorable map of Nelson Jeanrenaud's Last.fm listening history: one bubble per artist, sized by plays, placed by data-derived similarity.",
+} = Astro.props;
+
+const canonical = new URL(Astro.url.pathname, Astro.site).href;
+const base = import.meta.env.BASE_URL.replace(/\/$/, "");
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{title}</title>
+    <meta name="description" content={description} />
+    <meta name="author" content="Nelson Jeanrenaud" />
+    <meta name="theme-color" content="#141413" />
+    <link rel="canonical" href={canonical} />
+
+    <!-- Open Graph -->
+    <meta property="og:type" content="website" />
+    <meta property="og:title" content={title} />
+    <meta property="og:description" content={description} />
+    <meta property="og:url" content={canonical} />
+    <meta name="twitter:card" content="summary" />
+
+    <link rel="icon" href={`${base}/favicon.svg`} type="image/svg+xml" />
+
+    <!-- Bubble artwork comes straight from Last.fm's image CDN. -->
+    <link rel="preconnect" href="https://lastfm-img2.akamaized.net" />
+    <link rel="dns-prefetch" href="https://lastfm.freetls.fastly.net" />
+
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@300;400;500;600&display=swap"
+      rel="stylesheet"
+    />
+  </head>
+  <body>
+    <a class="skip-link" href="#map">Skip to the map</a>
+    <slot />
+  </body>
+</html>
