@@ -1,0 +1,65 @@
+name: Refresh the Last.fm snapshot
+
+# The map is a periodic snapshot, not a live feed (SPEC NG2 / REQ-32). This
+# rebuilds it from Last.fm every Monday, commits it if anything changed, and
+# then redeploys — which is also what keeps the "as of [date]" line honest
+# (REQ-25).
+#
+# The build makes roughly three Last.fm calls per artist, serialised behind a
+# fixed delay, so a weekly run stays comfortably inside Last.fm's terms
+# (REQ-31).
+on:
+  schedule:
+    - cron: "17 4 * * 1" # Mondays, 04:17 UTC
+  workflow_dispatch:
+    inputs:
+      limit:
+        description: "How many artists to include"
+        required: false
+        default: "300"
+
+permissions:
+  contents: write
+
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    outputs:
+      changed: ${{ steps.commit.outputs.changed }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Rebuild the snapshot
+        run: node scripts/build-snapshot.mjs --limit "${{ inputs.limit || '300' }}"
+        env:
+          # Optional overrides. Both fall back to the same public, read-only
+          # account/key the personal site's /music page ships.
+          LASTFM_USERNAME: ${{ vars.LASTFM_USERNAME }}
+          LASTFM_API_KEY: ${{ secrets.LASTFM_API_KEY }}
+      - name: Commit if the map moved
+        id: commit
+        run: |
+          if git diff --quiet -- public/data/snapshot.json; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "Snapshot unchanged — nothing to commit."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add public/data/snapshot.json
+          git commit -m "Refresh Last.fm snapshot"
+          git push
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+
+  redeploy:
+    needs: snapshot
+    if: needs.snapshot.outputs.changed == 'true'
+    uses: ./.github/workflows/deploy.yml
+    permissions:
+      contents: read
+      pages: write
+      id-token: write

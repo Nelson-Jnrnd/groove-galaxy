@@ -1,0 +1,195 @@
+---
+import BaseLayout from "../layouts/BaseLayout.astro";
+import SiteHeader from "../components/SiteHeader.astro";
+
+// The snapshot is a static file (SPEC §10) fetched at runtime rather than
+// inlined, so a refreshed snapshot doesn't require a rebuild of the page.
+// `BASE_URL` may or may not carry a trailing slash depending on config, so
+// join rather than concatenate.
+const snapshotUrl = `${import.meta.env.BASE_URL.replace(/\/$/, "")}/data/snapshot.json`;
+---
+
+<BaseLayout>
+  <SiteHeader />
+
+  <main class="app" id="map">
+    <!-- ─── The map ─── -->
+    <div class="stage" id="stage" data-state="loading" data-snapshot={snapshotUrl}>
+      <canvas id="canvas" class="stage__canvas"></canvas>
+
+      <!-- Lightweight hover/focus feedback before committing to a click (REQ-20) -->
+      <div class="tip" id="tip" role="presentation" hidden></div>
+
+      <noscript>
+        <div class="stage__veil">
+          <div class="veil__inner">
+            <p class="quiet">
+              The map is drawn in the browser, so it needs JavaScript. The
+              short version: 300 artists from my Last.fm history, sized by how
+              much I have played them and placed next to the artists the data
+              says they are most alike.
+            </p>
+          </div>
+        </div>
+      </noscript>
+
+      <!-- Loading / empty / error (REQ-23, REQ-24) -->
+      <div class="stage__veil" id="veil">
+        <div class="veil__inner">
+          <div class="veil__pulse" aria-hidden="true"></div>
+          <p class="quiet" id="veil-text" role="status">Charting the galaxy…</p>
+          <p class="quiet veil__sub" id="veil-sub" hidden></p>
+        </div>
+      </div>
+
+      <!-- ─── Controls ─── -->
+      <div class="controls">
+        <div class="finder" id="finder">
+          <label class="sr-only" for="search">Find an artist</label>
+          <input
+            id="search"
+            class="finder__input"
+            type="search"
+            placeholder="Find an artist…"
+            autocomplete="off"
+            spellcheck="false"
+            role="combobox"
+            aria-expanded="false"
+            aria-controls="results"
+            aria-autocomplete="list"
+          />
+          <ul class="finder__results" id="results" role="listbox" aria-label="Matching artists" hidden></ul>
+        </div>
+
+        <div class="zoom" role="group" aria-label="Zoom and view">
+          <button type="button" class="zoom__btn" id="zoom-out" aria-label="Zoom out">−</button>
+          <button type="button" class="zoom__btn" id="zoom-in" aria-label="Zoom in">+</button>
+          <button type="button" class="zoom__btn zoom__btn--wide" id="reset" title="Reset the view">
+            reset
+          </button>
+        </div>
+      </div>
+
+      <!-- ─── Cluster legend (auto-derived, see §method) ─── -->
+      <div class="legend" id="legend" hidden>
+        <button
+          type="button"
+          class="legend__toggle"
+          id="legend-toggle"
+          aria-expanded="false"
+          aria-controls="legend-body"
+        >
+          <span class="legend__title">Groups</span>
+          <span class="legend__chev" aria-hidden="true">▸</span>
+        </button>
+        <div class="legend__body" id="legend-body" hidden>
+          <p class="legend__note">
+            Colours mark groups the similarity data fell into on its own. Each
+            name is the tag most distinctive to that group's artists — a
+            description of what landed there, not a label anything was sorted
+            by.
+          </p>
+          <ul class="legend__list" id="legend-list"></ul>
+        </div>
+      </div>
+
+      <!--
+        The keyboard/screen-reader route through the map (REQ-22). Every
+        bubble also exists here as a real button: focusing one pans the map
+        to it and outlines it, activating one opens the same detail panel a
+        click would. Visually hidden so the canvas stays the visual language,
+        and placed after the controls so a keyboard user meets the search box
+        before three hundred artists.
+      -->
+      <div class="stage__a11y">
+        <h2 class="sr-only" id="a11y-heading">Artists on the map</h2>
+        <p class="sr-only">
+          A spatial map of artists. Bubbles sit near the artists they are
+          similar to; the horizontal and vertical directions carry no meaning
+          on their own. Moving through this list pans the map to each artist
+          in turn; activating one opens its details. Searching by name is
+          usually quicker — the search box is just before this list.
+        </p>
+        <ul class="sr-only" id="a11y-list" aria-labelledby="a11y-heading"></ul>
+      </div>
+
+      <!-- ─── Detail panel (REQ-14/15) ─── -->
+      <aside class="detail" id="detail" tabindex="-1" aria-label="Artist detail" hidden></aside>
+    </div>
+
+    <!-- ─── Caption strip: what you're looking at (REQ-3, REQ-25) ─── -->
+    <div class="caption">
+      <p class="caption__scope" id="caption-scope">&nbsp;</p>
+      <p class="caption__meta">
+        <span id="caption-asof"></span>
+        <button
+          type="button"
+          class="caption__link"
+          id="about-toggle"
+          aria-expanded="false"
+          aria-controls="about"
+        >How this map works</button>
+      </p>
+    </div>
+
+    <!-- ─── Method note ─── -->
+    <section class="about" id="about" hidden aria-label="How this map works">
+      <div class="about__inner">
+        <h2 class="about__h">How this map works</h2>
+        <dl class="about__dl">
+          <dt>What's on it</dt>
+          <dd id="about-scope"></dd>
+
+          <dt>How big a bubble is</dt>
+          <dd>
+            Bubble size follows how much I have actually listened to that
+            artist — my own scrobble count, not the artist's popularity. The
+            scale is logarithmic, so an artist with a few dozen plays is still
+            visible next to one with several thousand.
+          </dd>
+
+          <dt>Why bubbles sit where they sit</dt>
+          <dd>
+            Each artist is linked to the artists Last.fm's own listening data
+            says they are most alike. Those links pull artists together, every
+            other pair pushes apart, and the whole thing is relaxed until
+            nothing overlaps. Nobody sorted anyone into a genre first — open
+            any bubble and it will show you the specific artists it was pulled
+            toward, and how strong each of those links is.
+          </dd>
+
+          <dt>What the directions mean</dt>
+          <dd>
+            Nothing. Only the distance between two bubbles carries meaning:
+            near means similar. Left, right, up and down are just where the
+            simulation settled, and the whole map could be rotated without
+            losing any information.
+          </dd>
+
+          <dt>The colours</dt>
+          <dd>
+            Groups are found by passing labels around the same similarity
+            links until they settle — an outcome of the data, not a set of
+            buckets defined in advance. Each group's name is simply the
+            Last.fm tag most distinctive to the artists that landed in it.
+            Grey bubbles are artists with no strong tie to anything else here.
+          </dd>
+
+          <dt>How fresh it is</dt>
+          <dd id="about-fresh"></dd>
+        </dl>
+        <p class="about__foot">
+          Data from <a href="https://www.last.fm/api" target="_blank" rel="noopener noreferrer">Last.fm</a>,
+          read with the same public, read-only key the
+          <a id="about-music" href="https://nelson-j.ch/music" target="_top">/music</a>
+          page uses. <a id="about-profile" href="https://www.last.fm/user/NestorDHCP" target="_blank" rel="noopener noreferrer">Profile ↗</a>
+        </p>
+      </div>
+    </section>
+  </main>
+</BaseLayout>
+
+<script>
+  import { start } from "../scripts/map";
+  start();
+</script>
