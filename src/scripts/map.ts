@@ -63,9 +63,23 @@ interface Snapshot {
 const UNCLUSTERED = "#6d6a62";
 /** Screen radius (px) a bubble must reach before its name is drawn. */
 const LABEL_AT = 15;
-/** …and before it is worth downloading its artwork. */
-const ART_AT = 13;
-const MAX_CONCURRENT_IMAGES = 6;
+/** …and before its artwork is worth drawing rather than a flat disc. */
+const ART_AT = 10;
+/**
+ * Artwork comes in two sizes. Every artist's thumbnail is prefetched in the
+ * background — all 299 of them are only ~1.8 MB at 64px, which buys an
+ * already-illustrated map instead of one that fills in a bubble at a time
+ * as you zoom. The 174px version is fetched only once a bubble is big
+ * enough on screen that 64px would look soft; prefetching that size for
+ * everyone would cost ~11 MB, which is not a reasonable thing to do to
+ * someone's phone.
+ */
+const THUMB_PX = "64s";
+const DETAIL_PX = "174s";
+/** On-screen radius past which the thumbnail stops being enough. */
+const UPGRADE_AT = 34;
+/** Parallel image requests. One host over HTTP/2, so this can be generous. */
+const MAX_CONCURRENT_IMAGES = 10;
 const FLY_MS = 520;
 
 /* ─── Small helpers ──────────────────────────────────────────────────── */
@@ -90,10 +104,10 @@ const plural = (n: number, one: string, many = one + "s") =>
 
 /**
  * Last.fm image URLs carry their size in the path (`/i/u/300x300/<hash>.jpg`).
- * Bubbles are small, so ask for the 174px variant instead of the original.
+ * Bubbles are small, so ask for a variant rather than the original.
  */
-function sized(url: string): string {
-  return url.replace(/\/i\/u\/[^/]+\//, "/i/u/174s/");
+function sized(url: string, size: string): string {
+  return url.replace(/\/i\/u\/[^/]+\//, `/i/u/${size}/`);
 }
 
 function formatDate(iso: string): string {
@@ -246,9 +260,9 @@ function boot(
   /** Non-null while the search box is narrowing things down. */
   let matches: Set<number> | null = null;
 
-  const images = new Map<number, HTMLImageElement>();
-  const imageFailed = new Set<number>();
-  let loadingImages = 0;
+  /** Best artwork held for an artist so far, and which size it is. */
+  const images = new Map<number, { img: HTMLImageElement; detail: boolean }>();
+  const imageFailed = new Set<string>();
 
   let dirty = true;
   let rafId = 0;
@@ -257,25 +271,128 @@ function boot(
     if (!rafId) rafId = requestAnimationFrame(frame);
   };
 
-  /* ── artwork, fetched only for bubbles big enough to show it ────── */
+  /** The view moved, so what's worth fetching first has changed. */
+  const reprioritise = () => {
+    queueOrderStale = true;
+    pumpImages();
+  };
 
-  function wantImage(a: Artist) {
-    if (!a.image || images.has(a.id) || imageFailed.has(a.id)) return;
-    if (loadingImages >= MAX_CONCURRENT_IMAGES) return;
-    loadingImages++;
-    const img = new Image();
-    img.decoding = "async";
-    img.referrerPolicy = "no-referrer";
-    img.onload = () => {
-      loadingImages--;
-      images.set(a.id, img);
-      draw();
-    };
-    img.onerror = () => {
-      loadingImages--;
-      imageFailed.add(a.id);
-    };
-    img.src = sized(a.image);
+  /* ── artwork ─────────────────────────────────────────────────────
+     A self-draining queue. Every completion — success *or* failure —
+     starts the next job, so one dead image can no longer wedge the whole
+     pipeline the way a bare in-flight counter did. Jobs are re-sorted
+     whenever the view moves, so whatever is on screen is fetched first
+     and the background prefetch fills in behind it.                     */
+
+  interface ImageJob {
+    artist: Artist;
+    detail: boolean;
+  }
+
+  let queue: ImageJob[] = [];
+  const queued = new Set<string>();
+  let activeImages = 0;
+  let queueOrderStale = true;
+
+  const jobKey = (id: number, detail: boolean) =>
+    `${id}:${detail ? "d" : "t"}`;
+
+  function enqueue(a: Artist, detail: boolean) {
+    if (!a.image) return;
+    const key = jobKey(a.id, detail);
+    if (queued.has(key) || imageFailed.has(key)) return;
+    const held = images.get(a.id);
+    if (held && (held.detail || !detail)) return; // already have this or better
+    queued.add(key);
+    queue.push({ artist: a, detail });
+    pumpImages();
+  }
+
+  /** Distance from the centre of the viewport, in world units. */
+  function offScreenness(a: Artist) {
+    return Math.hypot(a.x - view.cx, a.y - view.cy);
+  }
+
+  function pumpImages() {
+    if (queueOrderStale && queue.length > 1) {
+      // Nearest to the middle of the current view first, and within that
+      // the bigger bubbles — which is the order a visitor notices them in.
+      queue.sort(
+        (j, k) =>
+          offScreenness(j.artist) - offScreenness(k.artist) ||
+          k.artist.r - j.artist.r,
+      );
+      queueOrderStale = false;
+    }
+
+    while (activeImages < MAX_CONCURRENT_IMAGES && queue.length) {
+      const job = queue.shift()!;
+      const key = jobKey(job.artist.id, job.detail);
+      const held = images.get(job.artist.id);
+      if (held && (held.detail || !job.detail)) {
+        queued.delete(key);
+        continue;
+      }
+
+      activeImages++;
+      const img = new Image();
+      img.decoding = "async";
+      img.referrerPolicy = "no-referrer";
+      // Only the on-demand upgrades get a priority hint. The background
+      // prefetch deliberately stays on "auto": marking it "low" lets
+      // Chromium's resource scheduler park those requests indefinitely
+      // while anything else on the page is still pending, which is exactly
+      // the never-finishes-loading behaviour this queue exists to fix.
+      if (job.detail) {
+        (img as HTMLImageElement & { fetchPriority?: string }).fetchPriority =
+          "high";
+      }
+
+      let settled = false;
+      const done = (ok: boolean) => {
+        if (settled) return;
+        settled = true;
+        window.clearTimeout(timer);
+        activeImages--;
+        queued.delete(key);
+        if (ok) {
+          const current = images.get(job.artist.id);
+          // A late thumbnail must never overwrite a detail image.
+          if (!current || (job.detail && !current.detail)) {
+            images.set(job.artist.id, { img, detail: job.detail });
+            draw();
+          }
+        } else {
+          imageFailed.add(key);
+        }
+        pumpImages(); // the point of all this: always keep draining
+      };
+
+      // Last.fm's CDN occasionally takes several seconds on a cache miss.
+      // Without this, one such request holds a slot indefinitely and the
+      // queue drains ten times slower than it should.
+      const timer = window.setTimeout(() => {
+        img.src = ""; // abandon it
+        done(false);
+      }, 15000);
+
+      img.onload = () => done(img.naturalWidth > 0);
+      img.onerror = () => done(false);
+      img.src = sized(job.artist.image, job.detail ? DETAIL_PX : THUMB_PX);
+    }
+  }
+
+  /**
+   * Warm every artist's thumbnail up front, so the map is illustrated
+   * before anyone zooms rather than because they did. Skipped when the
+   * visitor has asked their browser to save data.
+   */
+  function prefetchArtwork() {
+    const conn = (
+      navigator as Navigator & { connection?: { saveData?: boolean } }
+    ).connection;
+    if (conn && conn.saveData) return;
+    for (const a of artists) enqueue(a, false);
   }
 
   /* ── drawing ────────────────────────────────────────────────────── */
@@ -332,8 +449,9 @@ function boot(
       const color = colorOf(a);
       ctx.globalAlpha = alpha;
 
-      if (r >= ART_AT) wantImage(a);
-      const img = images.get(a.id);
+      if (r >= UPGRADE_AT) enqueue(a, true);
+      const held = images.get(a.id);
+      const img = held && held.img;
 
       ctx.beginPath();
       ctx.arc(sx, sy, r, 0, Math.PI * 2);
@@ -437,7 +555,10 @@ function boot(
       view.scale = from.scale * Math.pow(to.scale / from.scale, e);
       draw();
       if (t < 1) animation = requestAnimationFrame(step);
-      else animation = 0;
+      else {
+        animation = 0;
+        reprioritise();
+      }
     };
     animation = requestAnimationFrame(step);
   }
@@ -460,6 +581,7 @@ function boot(
     view.cx = wx - (sx - width / 2) / view.scale;
     view.cy = wy - (sy - height / 2) / view.scale;
     draw();
+    reprioritise();
   }
 
   function resetView() {
@@ -518,6 +640,7 @@ function boot(
       view.cy -= dy / view.scale;
       last = p;
       draw();
+      reprioritise();
       return;
     }
 
@@ -645,9 +768,16 @@ function boot(
       if (!origin) search.focus();
     });
 
-    const art = el("div", "detail__art" + (images.get(a.id) || a.image ? "" : " detail__art--empty"));
-    if (a.image) art.style.backgroundImage = `url("${sized(a.image)}")`;
-    else art.textContent = "♪";
+    const art = el(
+      "div",
+      "detail__art" + (a.image ? "" : " detail__art--empty"),
+    );
+    if (a.image) {
+      art.style.backgroundImage = `url("${sized(a.image, DETAIL_PX)}")`;
+      enqueue(a, true); // the map should sharpen to match the panel
+    } else {
+      art.textContent = "♪";
+    }
     art.style.setProperty("--tint", colorOf(a));
 
     const body = el("div", "detail__body");
@@ -1035,6 +1165,7 @@ function boot(
   );
 
   resize();
+  prefetchArtwork();
   stage.dataset.state = "ready";
   veil.hidden = true;
   canvas.style.cursor = "grab";
