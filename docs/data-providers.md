@@ -187,18 +187,27 @@ Last.fm did to nobody what Spotify did to everybody, but it is a single
 private dependency in maintenance mode, and the Spotify episode is the
 reference class for how these end.
 
-The current design already absorbs that:
+The design contains it only partly, and it is worth being straight about
+which part:
 
-- every provider call is behind one module (`scripts/lib/lastfm.mjs`), not
-  scattered through the pipeline;
-- the snapshot is **committed to the repo**, so the site builds and serves with
-  no network access at all;
-- the page states its own snapshot date.
+- every provider call is behind one module (`src/lib/lastfm.ts`), so swapping
+  the similarity source is a contained change;
+- a month of similarity, tags and artwork is cached in each visitor's browser,
+  so a short outage is invisible to anyone who has been before.
 
-So the failure mode of Last.fm disappearing is not a dead map. It is a map
-that stops updating and says so on its own front page, with however long it
-takes to swap the similarity source underneath it. That is the right blast
-radius for a portfolio piece, and it is worth keeping that way.
+But since the map became live (see README, "How a map gets built") there is
+no committed dataset behind it. If Last.fm goes away, a first-time visitor
+gets the quiet "couldn't reach Last.fm" state rather than a stale map. That
+is a deliberate trade — it bought the removal of the weekly job and the
+always-current data — and it is the reason the module boundary above matters
+more than it used to.
+
+One correction to the measurements above, found later: Last.fm **does**
+rate-limit, despite a 60-call burst at 110 req/s drawing no complaint. Enough
+sustained volume returns `error 29`, so the client backs off and retries
+rather than failing a map mid-build. A single visitor building one map makes
+about 900 calls and does not come close; it took repeated full rebuilds in a
+test loop to trip it.
 
 ## Sources
 

@@ -2,11 +2,9 @@
 import BaseLayout from "../layouts/BaseLayout.astro";
 import SiteHeader from "../components/SiteHeader.astro";
 
-// The snapshot is a static file (SPEC §10) fetched at runtime rather than
-// inlined, so a refreshed snapshot doesn't require a rebuild of the page.
-// `BASE_URL` may or may not carry a trailing slash depending on config, so
-// join rather than concatenate.
-const snapshotUrl = `${import.meta.env.BASE_URL.replace(/\/$/, "")}/data/snapshot.json`;
+// Whose listening history the map shows by default. A `?user=` parameter
+// overrides it, which is most of what a "show me mine" control will need.
+const DEFAULT_USER = "NestorDHCP";
 ---
 
 <BaseLayout>
@@ -14,7 +12,7 @@ const snapshotUrl = `${import.meta.env.BASE_URL.replace(/\/$/, "")}/data/snapsho
 
   <main class="app" id="map">
     <!-- ─── The map ─── -->
-    <div class="stage" id="stage" data-state="loading" data-snapshot={snapshotUrl}>
+    <div class="stage" id="stage" data-state="loading" data-default-user={DEFAULT_USER}>
       <canvas id="canvas" class="stage__canvas"></canvas>
 
       <!-- Lightweight hover/focus feedback before committing to a click (REQ-20) -->
@@ -24,10 +22,10 @@ const snapshotUrl = `${import.meta.env.BASE_URL.replace(/\/$/, "")}/data/snapsho
         <div class="stage__veil">
           <div class="veil__inner">
             <p class="quiet">
-              The map is drawn in the browser, so it needs JavaScript. The
-              short version: 300 artists from my Last.fm history, sized by how
-              much I have played them and placed next to the artists the data
-              says they are most alike.
+              The map is built and drawn in the browser, so it needs
+              JavaScript. The short version: the 300 artists I have played
+              most on Last.fm, sized by how much I have played them and
+              placed next to the artists the data says they are most alike.
             </p>
           </div>
         </div>
@@ -37,7 +35,7 @@ const snapshotUrl = `${import.meta.env.BASE_URL.replace(/\/$/, "")}/data/snapsho
       <div class="stage__veil" id="veil">
         <div class="veil__inner">
           <div class="veil__pulse" aria-hidden="true"></div>
-          <p class="quiet" id="veil-text" role="status">Charting the galaxy…</p>
+          <p class="quiet" id="veil-text" role="status">Reading the scrobbles…</p>
           <p class="quiet veil__sub" id="veil-sub" hidden></p>
         </div>
       </div>
@@ -175,7 +173,7 @@ const snapshotUrl = `${import.meta.env.BASE_URL.replace(/\/$/, "")}/data/snapsho
             Grey bubbles are artists with no strong tie to anything else here.
           </dd>
 
-          <dt>How fresh it is</dt>
+          <dt>Where it comes from</dt>
           <dd id="about-fresh"></dd>
         </dl>
         <p class="about__foot">

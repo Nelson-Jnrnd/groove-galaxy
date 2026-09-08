@@ -1,9 +1,15 @@
 # Groove Galaxy
 
-An explorable map of the artists in my Last.fm listening history. One bubble
-per artist, sized by how much I have actually played them, positioned so that
-artists the data says are alike end up near each other. Pan, zoom, search,
-click a bubble to see why it sits where it does.
+An explorable map of the artists in a Last.fm listening history. One bubble
+per artist, sized by how much they have actually been played, positioned so
+that artists the data says are alike end up near each other. Pan, zoom,
+search, click a bubble to see why it sits where it does.
+
+The map is **built live in the browser**. There is no precomputed dataset, no
+server and no scheduled job: opening the page reads Last.fm directly, draws
+every bubble within about a second, and lets the layout settle over the next
+few seconds while you watch. Whatever it looks up is cached in your browser,
+so coming back is close to instant.
 
 It answers a different question than the `/music` page on
 [nelson-j.ch](https://nelson-j.ch): that one says *what is playing right
@@ -22,24 +28,23 @@ questions was resolved to.
   No charting or graph library: at three hundred bubbles the whole frame is a
   few hundred arcs, and drawing it by hand keeps the bundle at ~6 kB gzipped
   and the pan/zoom exactly as responsive as it needs to be.
-- Node scripts for the data pipeline. No runtime backend — the page is
-  static files plus one JSON snapshot.
+- No runtime backend and no build-time data step: the deployed site is an
+  HTML file, a stylesheet and about 20 kB of JavaScript.
 
 ## Project structure
 
 ```
-scripts/
-├── build-snapshot.mjs     # the whole data pipeline (see below)
-├── lib/lastfm.mjs         # rate-limited, disk-cached Last.fm client
-├── lib/layout.mjs         # MDS seed, force simulation, label propagation
-└── preview.mjs            # dev helper: dump a snapshot to a flat SVG
 src/
+├── lib/
+│   ├── lastfm.ts          # browser Last.fm client: pooled, backing off, cached
+│   ├── cache.ts           # IndexedDB store, one lifetime per kind of entry
+│   ├── layout.ts          # MDS seed, force simulation (steppable), clustering
+│   └── build.ts           # orchestrates a live build, emitting as it goes
 ├── layouts/BaseLayout.astro
 ├── components/SiteHeader.astro
 ├── pages/index.astro      # the page: canvas, controls, panels, method note
-├── scripts/map.ts         # rendering + interaction
+├── scripts/map.ts         # rendering, interaction, driving the settling layout
 └── styles/global.css
-public/data/snapshot.json  # the committed snapshot the page renders
 ```
 
 ## Run locally
@@ -51,50 +56,63 @@ npm run build            # static output to ./dist
 npm run preview
 npm run check            # astro type/diagnostics check
 
-npm run snapshot         # rebuild public/data/snapshot.json from Last.fm
-npm run snapshot:layout  # re-run layout/clustering from the on-disk API cache
 ```
 
-`npm run snapshot` makes about three Last.fm calls per artist (~900 in
-total), serialised behind a fixed delay, and caches every response under
-`.cache/`. Once that cache is warm, `npm run snapshot:layout` re-runs the
-layout in a couple of seconds with no network at all — that is the loop to
-use when tuning anything about the map's shape.
+`?user=<name>` builds the map for any public Last.fm account instead of the
+default one — no sign-in, because `user.getTopArtists` is a public read.
 
-Useful flags: `--limit`, `--min-plays`, `--period`, `--gravity`, `--out`,
-`--offline`.
+## How a map gets built
 
-## The data pipeline
+Ordered so that the map exists long before it is finished:
 
-1. **Pick the artists.** `user.getTopArtists` (all-time), keep the top 300
-   with at least 25 plays.
-2. **Find the similarity.** `artist.getSimilar` for each of them; keep only
-   matches that are *also on the map*, take the stronger of the two
-   directions for each pair, and keep each artist's ten strongest links so a
-   single hub artist can't drag the whole map into its lap.
-3. **Decorate.** `artist.getTopTags` for group labelling, and
-   `artist.getTopAlbums` for artwork.
-4. **Place.** Classical MDS on graph-hop distance for the global shape, then
-   a force simulation (similarity pulls, everything else pushes, weak gravity
-   toward the centre), then an overlap-relaxation pass.
-5. **Group.** Label propagation over the same similarity graph.
-6. **Emit** one JSON file with positions, radii, colours, group labels and
-   each artist's nearest neighbours.
+1. **The artist set** — one `user.getTopArtists` call. Every bubble now
+   exists, correctly sized, arranged on an even spiral. About a second in;
+   the map is already pannable and searchable.
+2. **Similarity** — one `artist.getSimilar` per artist, twenty at a time,
+   restricted to artists *also on this map*. Edges accumulate, and the force
+   simulation runs a few passes per frame, so the map visibly reorganises
+   itself from a ring into clusters instead of appearing after a freeze.
+3. **Groups** — label propagation over the finished graph, which is what
+   colours the bubbles.
+4. **Tags and artwork** — fetched afterwards, in the background, behind the
+   foreground work in the same request pool. Groups are named after their
+   heaviest artist until tags arrive and a better name can be derived.
 
-Everything above happens at snapshot time. The browser only draws.
+Measured on a 300-artist account: **first bubbles at ~1s, complete at ~5s**,
+and **~0.6s with nothing fetched at all** on a second visit.
 
-The snapshot is committed to the repo, and
-[`.github/workflows/snapshot.yml`](.github/workflows/snapshot.yml) rebuilds it
-every Monday, commits it if it changed, and redeploys.
+## The cache
+
+The observation it is built on: **similarity is not personal.** That Daft
+Punk is close to Justice is true of everybody's map, so it is worth keeping
+for a month and is equally useful to whoever's history gets drawn next. Tags
+and artwork are the same. Only play counts belong to one person, and those
+are the one thing that must stay current.
+
+So `src/lib/cache.ts` files entries by kind, each with its own lifetime —
+similarity, tags and art for 30 days, top artists for 6 hours — in IndexedDB
+(localStorage is synchronous, so it would stutter the layout, and it caps out
+around 5 MB). Entries are evicted least-recently-used past a ceiling, and
+every failure path — private browsing, disabled storage, eviction — lands on
+"cache miss" and nothing worse.
+
+The payoff is not only the reload. Two accounts with overlapping taste share
+their similarity entries, so the second map anyone builds in the same browser
+is partly paid for already.
 
 ### Credentials
 
 None that are new. The account (`NestorDHCP`) and the read-only Last.fm API
 key are the same public pair the personal site's `/music` page already ships
-in its page source — the key only ever sees public scrobble data. They are
-baked in as defaults and can be overridden with `LASTFM_USERNAME` /
-`LASTFM_API_KEY` (repository *variable* and *secret* respectively, wired up in
-the snapshot workflow).
+in its page source. They are baked into the client, which is where they have
+to be — the map is built in the browser, so there is nothing server-side to
+hide them behind. That is only acceptable because the key is read-only and
+sees nothing but public scrobble data.
+
+Note that going live raised the traffic on that key from a dozen calls per
+visitor to roughly 900. Last.fm does throttle (`error 29`), and the client
+backs off and retries when it happens; the per-browser cache is what keeps a
+returning visitor from spending any of that budget at all.
 
 ## Decisions
 
@@ -141,11 +159,12 @@ site's header and links back to `/music` and the homepage from every state
 ever embedded after all. **This side is ready; the link on `/music` itself
 still needs adding in the personal site repo** — see "Still to do".
 
-**OQ-6 — Snapshot mechanics.** A Node script, run weekly by a scheduled
-GitHub Action, committing its output to the repo. Committing the snapshot
-means the site builds identically without network access, the map's history
-is inspectable in git, and a Last.fm outage can never take the map down —
-worst case it goes stale, which the page says out loud.
+**OQ-6 — Snapshot mechanics.** *Superseded.* There is no snapshot. The map
+is built live in the browser on every visit and cached there, which is what
+made the weekly job, the committed dataset and the "as of" staleness notice
+all unnecessary — and retires SPEC NG2, REQ-25 and REQ-32 with them. The
+trade is that a Last.fm outage now means no map at all rather than a stale
+one; the quiet state says so.
 
 **OQ-7 — Bubble scale.** Logarithmic, radius from ~11 to ~58 layout units.
 The play-count distribution runs from 5,567 down to 25, so a linear scale
