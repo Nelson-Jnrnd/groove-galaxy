@@ -101,6 +101,10 @@ the snapshot workflow).
 The spec deliberately left the following open. Here is what they were
 resolved to, and why.
 
+A fuller comparison of Last.fm against Spotify, ListenBrainz and Deezer —
+including a measured bake-off on this map's own artists — is in
+[`docs/data-providers.md`](./docs/data-providers.md).
+
 **OQ-1 — Similarity signal and layout.** Similarity is Last.fm's own
 `artist.getSimilar` match score, which is derived from listening behaviour
 rather than editorial genre tags — exactly the kind of signal REQ-8 asks for.
