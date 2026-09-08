@@ -57,6 +57,13 @@ const RADIUS = { min: 11, max: 58 };
 const EDGES_PER_ARTIST = 10;
 /** Below this match score an edge is too weak to mean anything. */
 const MIN_MATCH = 0.05;
+/**
+ * A tag can't name a group unless it actually holds for most of it — short
+ * of this share of members, the name would claim something true of a
+ * minority and misleading for the rest (e.g. two British-tagged members
+ * naming a ten-artist group that is mostly something else).
+ */
+const MIN_LABEL_SHARE = 0.4;
 
 /** Muted, tuned for the off-black ground, assigned by group size (OQ-8). */
 const PALETTE = [
@@ -311,6 +318,7 @@ async function enrich(
     for (const [tag, count] of local) {
       if (count < 2) continue;
       const share = count / members.length;
+      if (share < MIN_LABEL_SHARE) continue;
       const distinctiveness = count / (globalCounts.get(tag) || count);
       const score = share * Math.pow(distinctiveness, 1.5);
       if (score > bestScore) {
