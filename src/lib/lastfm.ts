@@ -82,7 +82,7 @@ export class LastFmError extends Error {
 }
 
 /** Last.fm's own code for "you are asking too fast". */
-const RATE_LIMITED = 29;
+export const RATE_LIMITED = 29;
 /** …and for "no such user", which is a normal thing for a visitor to hit. */
 export const USER_NOT_FOUND = 6;
 

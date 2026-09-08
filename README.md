@@ -58,8 +58,21 @@ npm run check            # astro type/diagnostics check
 
 ```
 
-`?user=<name>` builds the map for any public Last.fm account instead of the
-default one — no sign-in, because `user.getTopArtists` is a public read.
+## Whose map
+
+Any public Last.fm account. "Map another account" in the caption strip opens
+a username prompt, and `?user=<name>` does the same thing from a URL — so a
+map is shareable and survives the back button.
+
+There is no sign-in and no OAuth, because none is needed:
+`user.getTopArtists` is a public read. Nothing about a visitor leaves their
+browser; the accounts they have looked at are remembered locally so the
+prompt can offer them back, and those maps are close to instant because the
+cache already holds them.
+
+This deliberately supersedes SPEC NG1 ("not a multi-user product"). The
+original reasoning was that a per-visitor map would need a backend; building
+live in the browser removed that, and with it the reason to say no.
 
 ## How a map gets built
 
@@ -195,6 +208,27 @@ again on close. The list sits *after* the search box and controls in the tab
 order, since searching by name is the faster route through three hundred
 artists. Colour is never the only carrier of meaning — every group's name is
 written out in the legend and in each artist's panel.
+
+## Known risk: the shared API key
+
+Going live took the key from a dozen calls per visitor to roughly 900 — one
+per artist for similarity, plus tags and artwork in the background. Last.fm
+does throttle (`error 29`), and testing this repeatedly trips it: a run that
+rebuilt several full maps back to back saw 177 of 922 responses rate-limited.
+The client backs off and retries, so the map still completes, but it takes
+longer.
+
+One visitor building one map is nowhere near that. But if this page ever gets
+real traffic, the levers in order of how much they buy and how little they
+cost are:
+
+1. **Cut the background 600.** Tags and artwork are two-thirds of the volume
+   and pure enrichment. Tags only name the groups, so sampling the dozen
+   heaviest artists per group would give the same labels for a fraction of
+   the calls — at the cost of the per-artist tag chips in the detail panel.
+2. **Lower the artist cap.** 300 → 150 roughly halves everything and still
+   makes a rich map (~2s instead of ~5s).
+3. **Get a key of its own**, rather than sharing with `/music`.
 
 ## Still to do
 

@@ -37,6 +37,9 @@ const DEFAULT_USER = "NestorDHCP";
           <div class="veil__pulse" aria-hidden="true"></div>
           <p class="quiet" id="veil-text" role="status">Reading the scrobbles…</p>
           <p class="quiet veil__sub" id="veil-sub" hidden></p>
+          <button type="button" class="veil__retry" id="veil-retry" hidden>
+            Try another account
+          </button>
         </div>
       </div>
 
@@ -120,6 +123,9 @@ const DEFAULT_USER = "NestorDHCP";
       <p class="caption__scope" id="caption-scope">&nbsp;</p>
       <p class="caption__meta">
         <span id="caption-asof"></span>
+        <button type="button" class="caption__link" id="account-open">
+          Map another account
+        </button>
         <button
           type="button"
           class="caption__link"
@@ -129,6 +135,49 @@ const DEFAULT_USER = "NestorDHCP";
         >How this map works</button>
       </p>
     </div>
+
+    <!--
+      Whose map to draw. Any public Last.fm account works, because
+      user.getTopArtists is a public read — there is nothing to sign in to
+      and nothing leaves the browser.
+    -->
+    <dialog class="account" id="account">
+      <form method="dialog" class="account__form" id="account-form">
+        <h2 class="account__h">Whose listening history?</h2>
+        <p class="account__note">
+          Any public Last.fm account. There is no sign-in — the map is built
+          in your browser from the same public data the profile page shows.
+        </p>
+
+        <label class="sr-only" for="account-input">Last.fm username</label>
+        <input
+          class="account__input"
+          id="account-input"
+          name="user"
+          type="text"
+          placeholder="Last.fm username"
+          autocomplete="username"
+          spellcheck="false"
+          autocapitalize="none"
+          required
+        />
+        <p class="account__error" id="account-error" role="alert" hidden></p>
+
+        <div class="account__recent" id="account-recent" hidden>
+          <p class="account__recent-head">Already in this browser's cache</p>
+          <ul class="account__recent-list" id="account-recent-list"></ul>
+        </div>
+
+        <div class="account__actions">
+          <button type="button" class="account__btn" id="account-cancel">
+            Cancel
+          </button>
+          <button type="submit" class="account__btn account__btn--go">
+            Show this map
+          </button>
+        </div>
+      </form>
+    </dialog>
 
     <!-- ─── Method note ─── -->
     <section class="about" id="about" hidden aria-label="How this map works">

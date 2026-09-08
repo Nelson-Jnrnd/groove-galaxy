@@ -640,3 +640,131 @@ p { margin: 0; }
 @media (max-width: 44rem) {
   .stage:has(.detail:not([hidden])) .legend { display: none; }
 }
+
+/* ---------- "try another account", inside the quiet states ---------- */
+.veil__retry {
+  appearance: none;
+  -webkit-appearance: none;
+  cursor: pointer;
+  margin-top: 0.35rem;
+  padding: 0.45rem 0.9rem;
+  color: var(--text);
+  background: none;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  font-family: var(--mono);
+  font-size: 0.76rem;
+  letter-spacing: 0.03em;
+  transition: border-color 0.15s ease, color 0.15s ease;
+}
+.veil__retry:hover { border-color: var(--green-soft); color: var(--green); }
+
+/* ---------- account dialog ---------- */
+.account {
+  width: min(24rem, calc(100vw - 2rem));
+  padding: 0;
+  color: var(--text);
+  background: var(--bg-soft);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.6);
+}
+.account::backdrop {
+  background: rgba(10, 10, 9, 0.72);
+  backdrop-filter: blur(3px);
+}
+.account__form { padding: 1.25rem; display: grid; gap: 0.65rem; }
+.account__h {
+  margin: 0;
+  font-size: 1.05rem;
+  font-weight: 600;
+  letter-spacing: -0.005em;
+}
+.account__note {
+  font-size: 0.82rem;
+  line-height: 1.55;
+  color: var(--text-faint);
+}
+.account__input {
+  width: 100%;
+  appearance: none;
+  -webkit-appearance: none;
+  font-family: var(--sans);
+  font-size: 0.95rem;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  padding: 0.55rem 0.75rem;
+}
+.account__input::placeholder { color: var(--text-faint); }
+.account__input:focus { border-color: var(--green-soft); outline: none; }
+.account__input:focus-visible { outline: 2px solid var(--green); outline-offset: 1px; }
+.account__error {
+  font-family: var(--mono);
+  font-size: 0.74rem;
+  color: var(--gold);
+}
+
+.account__recent { margin-top: 0.15rem; }
+.account__recent-head {
+  font-family: var(--mono);
+  font-size: 0.66rem;
+  letter-spacing: 0.11em;
+  text-transform: uppercase;
+  color: var(--green);
+  margin-bottom: 0.4rem;
+}
+.account__recent-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+.account__recent-btn {
+  appearance: none;
+  -webkit-appearance: none;
+  cursor: pointer;
+  padding: 0.25rem 0.6rem;
+  color: var(--text-dim);
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-family: var(--sans);
+  font-size: 0.8rem;
+}
+.account__recent-btn:hover {
+  color: var(--text);
+  border-color: var(--border-strong);
+  background: rgba(236, 233, 225, 0.05);
+}
+
+.account__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+  margin-top: 0.35rem;
+}
+.account__btn {
+  appearance: none;
+  -webkit-appearance: none;
+  cursor: pointer;
+  padding: 0.5rem 0.9rem;
+  color: var(--text-dim);
+  background: none;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  font-family: var(--sans);
+  font-size: 0.87rem;
+  transition: color 0.15s ease, border-color 0.15s ease, background 0.15s ease;
+}
+.account__btn:hover { color: var(--text); }
+.account__btn--go {
+  color: var(--bg);
+  background: var(--gold);
+  border-color: var(--gold);
+  font-weight: 500;
+}
+.account__btn--go:hover { background: var(--gold-soft); border-color: var(--gold-soft); color: var(--bg); }

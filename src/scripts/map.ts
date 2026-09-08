@@ -16,7 +16,7 @@ import {
   type Cluster,
 } from "../lib/build";
 import * as cache from "../lib/cache";
-import { LastFmError, USER_NOT_FOUND } from "../lib/lastfm";
+import { LastFmError, RATE_LIMITED, USER_NOT_FOUND } from "../lib/lastfm";
 import {
   adjacency,
   ForceLayout,
@@ -126,6 +126,7 @@ export function start(): void {
     }
   }
 
+  const accounts = wireAccountSwitcher(user);
   let map: MapView | null = null;
 
   build(user, {
@@ -146,6 +147,7 @@ export function start(): void {
     },
   })
     .then(() => {
+      accounts.remember(user);
       map?.finish();
       // Housekeeping only once nobody is waiting on the network.
       void cache.sweep();
@@ -166,13 +168,147 @@ export function start(): void {
           "No Last.fm account by that name.",
           `Last.fm doesn't know a user called "${user}".`,
         );
+      } else if (err instanceof LastFmError && err.code === RATE_LIMITED) {
+        // The key is shared and read-only, so a busy spell is somebody
+        // else's map rather than anything this visitor did.
+        quiet(
+          "Last.fm is asking us to slow down.",
+          "Too many maps have been built in a short space of time. Waiting a minute and refreshing usually clears it.",
+        );
       } else {
         quiet(
           "Couldn't reach Last.fm just now.",
           "The map is built from live Last.fm data, and the request didn't come back. Refreshing may help.",
         );
       }
+      // Every failure gets a way forward — a dead end is never the right
+      // answer when picking a different account might just work.
+      accounts.offerRetry(user);
     });
+}
+
+/* ─── Choosing whose map to draw ─────────────────────────────────────── */
+
+/** Accounts whose maps this browser has already built, newest first. */
+const RECENTS_KEY = "groove-galaxy:recent-accounts";
+const MAX_RECENTS = 6;
+
+function readRecents(): string[] {
+  try {
+    const raw = localStorage.getItem(RECENTS_KEY);
+    const list: unknown = raw ? JSON.parse(raw) : [];
+    return Array.isArray(list)
+      ? list.filter((x): x is string => typeof x === "string")
+      : [];
+  } catch {
+    return []; // storage disabled — the feature simply isn't there
+  }
+}
+
+/**
+ * The account switcher.
+ *
+ * Wired up before the build starts and independent of it, because the case
+ * that most needs it is the one where the build failed: a mistyped username
+ * must offer a way to fix itself rather than being a dead end.
+ *
+ * Switching navigates rather than rebuilding in place — the URL is then the
+ * thing that identifies a map, so it can be shared, bookmarked and reached
+ * with the back button.
+ */
+function wireAccountSwitcher(current: string) {
+  const dialog = $<HTMLDialogElement>("account");
+  const form = $<HTMLFormElement>("account-form");
+  const input = $<HTMLInputElement>("account-input");
+  const error = $<HTMLParagraphElement>("account-error");
+  const recentWrap = $<HTMLDivElement>("account-recent");
+  const recentList = $<HTMLUListElement>("account-recent-list");
+  const retry = $<HTMLButtonElement>("veil-retry");
+
+  function show(prefill = "") {
+    error.hidden = true;
+    input.value = prefill;
+    renderRecents();
+    if (typeof dialog.showModal === "function") dialog.showModal();
+    else dialog.setAttribute("open", "");
+    input.focus();
+    input.select();
+  }
+
+  function renderRecents() {
+    const others = readRecents().filter(
+      (name) => name.toLowerCase() !== current.toLowerCase(),
+    );
+    recentList.replaceChildren();
+    if (!others.length) {
+      recentWrap.hidden = true;
+      return;
+    }
+    recentWrap.hidden = false;
+    for (const name of others) {
+      const li = document.createElement("li");
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "account__recent-btn";
+      btn.textContent = name;
+      // These are the maps that cost nothing to draw again.
+      btn.title = `Show ${name}'s map — already cached, so it loads instantly`;
+      btn.addEventListener("click", () => go(name));
+      li.append(btn);
+      recentList.append(li);
+    }
+  }
+
+  function go(name: string) {
+    const clean = name.trim();
+    if (!clean) return;
+    const url = new URL(location.href);
+    url.searchParams.set("user", clean);
+    location.assign(url.toString());
+  }
+
+  $<HTMLButtonElement>("account-open").addEventListener("click", () =>
+    show(current),
+  );
+  $<HTMLButtonElement>("account-cancel").addEventListener("click", () =>
+    dialog.close(),
+  );
+
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    const name = input.value.trim();
+    // Last.fm usernames are short and have no spaces; catching that here
+    // saves a round trip to be told the obvious.
+    if (!name || /\s/.test(name) || name.length > 30) {
+      error.textContent = "That doesn't look like a Last.fm username.";
+      error.hidden = false;
+      input.focus();
+      return;
+    }
+    go(name);
+  });
+
+  return {
+    /** Offer the switcher from a failed build, prefilled with what failed. */
+    offerRetry(prefill = "") {
+      retry.hidden = false;
+      retry.onclick = () => show(prefill);
+    },
+    /** Only remember an account whose map actually built. */
+    remember(name: string) {
+      try {
+        const next = [
+          name,
+          ...readRecents().filter(
+            (x) => x.toLowerCase() !== name.toLowerCase(),
+          ),
+        ].slice(0, MAX_RECENTS);
+        localStorage.setItem(RECENTS_KEY, JSON.stringify(next));
+      } catch {
+        /* storage disabled; the switcher still works, just without history */
+      }
+    },
+  };
 }
 
 /* ─── The map proper ─────────────────────────────────────────────────── */
@@ -929,11 +1065,7 @@ function boot(
       const btn = document.createElement("button");
       btn.type = "button";
       btn.setAttribute("aria-pressed", "false");
-      const group =
-        a.cluster >= 0 && clusters[a.cluster]
-          ? `, in the ${clusters[a.cluster].label} group`
-          : ", not close to any group";
-      btn.textContent = `${a.name}, ${plural(a.plays, "play")}${group}`;
+      btn.textContent = `${a.name}, ${plural(a.plays, "play")}${groupPhrase(a)}`;
       btn.addEventListener("focus", () => {
         focused = a;
         flyToArtist(a);
@@ -958,16 +1090,27 @@ function boot(
     a11yList.append(frag);
   }
 
+  /**
+   * A group is named either after a tag ("french") or, before tags land,
+   * after the artist at its heart ("around L'Impératrice") — which needs a
+   * different sentence around it to read as English.
+   */
+  function groupPhrase(a: Artist) {
+    const label = a.cluster >= 0 && clusters[a.cluster]
+      ? clusters[a.cluster].label
+      : "";
+    if (!label) return ", not close to any group";
+    return label.startsWith("around ")
+      ? `, in the group ${label}`
+      : `, in the ${label} group`;
+  }
+
   /** Group names only exist once clustering has run; refresh them then. */
   function rebuildA11yLabels() {
     for (const [id, btn] of a11yButtons) {
       const a = byId.get(id);
       if (!a) continue;
-      const group =
-        a.cluster >= 0 && clusters[a.cluster]
-          ? `, in the ${clusters[a.cluster].label} group`
-          : ", not close to any group";
-      btn.textContent = `${a.name}, ${plural(a.plays, "play")}${group}`;
+      btn.textContent = `${a.name}, ${plural(a.plays, "play")}${groupPhrase(a)}`;
     }
   }
 
@@ -1192,6 +1335,9 @@ function boot(
   const profile = $<HTMLAnchorElement>("about-profile");
   profile.href = meta.profileUrl;
   profile.textContent = `${meta.user} on Last.fm ↗`;
+
+  // A shared link should say whose map it opens.
+  document.title = `${meta.user}'s listening map · Groove Galaxy`;
 
   /** The live status line: what the map is still waiting for. */
   function setState(text: string) {
