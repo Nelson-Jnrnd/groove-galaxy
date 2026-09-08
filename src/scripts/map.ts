@@ -78,8 +78,16 @@ const THUMB_PX = "64s";
 const DETAIL_PX = "174s";
 /** On-screen radius past which the thumbnail stops being enough. */
 const UPGRADE_AT = 34;
-/** Parallel image requests. One host over HTTP/2, so this can be generous. */
-const MAX_CONCURRENT_IMAGES = 10;
+/**
+ * Parallel image requests. Prefetching 299 thumbnails is bound by round
+ * trips, not bandwidth — Last.fm's CDN averages ~200ms to first byte, so
+ * wall-clock time is essentially (299 / this number) × 200ms. It serves
+ * HTTP/2, where extra requests are extra streams on one connection rather
+ * than extra connections, so a higher number is close to free. Anyone
+ * behind an HTTP/1.1 proxy is capped at six by their browser regardless,
+ * and simply queues.
+ */
+const MAX_CONCURRENT_IMAGES = 24;
 const FLY_MS = 520;
 
 /* ─── Small helpers ──────────────────────────────────────────────────── */
