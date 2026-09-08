@@ -36,16 +36,36 @@ const base = import.meta.env.BASE_URL.replace(/\/$/, "");
 
     <link rel="icon" href={`${base}/favicon.svg`} type="image/svg+xml" />
 
-    <!-- Bubble artwork comes straight from Last.fm's image CDN. -->
-    <link rel="preconnect" href="https://lastfm-img2.akamaized.net" />
-    <link rel="dns-prefetch" href="https://lastfm.freetls.fastly.net" />
+    <!--
+      Bubble artwork comes straight from Last.fm's image CDN, and every URL
+      in the snapshot is on this one host — so the connection is worth
+      opening before the first bubble asks for a thumbnail. (An earlier
+      version named two hosts the snapshot never actually uses.)
+    -->
+    <link rel="preconnect" href="https://lastfm-img.freetls.fastly.net" crossorigin />
+    <link rel="dns-prefetch" href="https://lastfm-img.freetls.fastly.net" />
 
+    <!--
+      Fonts load asynchronously rather than render-blocking. This is not
+      only about first paint: while a render-blocking stylesheet is still
+      pending, Chromium's resource scheduler holds back non-critical
+      requests — which here means every bubble's artwork. A slow font CDN
+      would otherwise leave the map unillustrated for as long as it took.
+    -->
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
       href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@300;400;500;600&display=swap"
       rel="stylesheet"
+      media="print"
+      onload="this.setAttribute('media', 'all')"
     />
+    <noscript>
+      <link
+        href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@300;400;500;600&display=swap"
+        rel="stylesheet"
+      />
+    </noscript>
   </head>
   <body>
     <a class="skip-link" href="#map">Skip to the map</a>
