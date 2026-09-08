@@ -2,11 +2,9 @@
 import BaseLayout from "../layouts/BaseLayout.astro";
 import SiteHeader from "../components/SiteHeader.astro";
 
-// The snapshot is a static file (SPEC §10) fetched at runtime rather than
-// inlined, so a refreshed snapshot doesn't require a rebuild of the page.
-// `BASE_URL` may or may not carry a trailing slash depending on config, so
-// join rather than concatenate.
-const snapshotUrl = `${import.meta.env.BASE_URL.replace(/\/$/, "")}/data/snapshot.json`;
+// Whose listening history the map shows by default. A `?user=` parameter
+// overrides it, which is most of what a "show me mine" control will need.
+const DEFAULT_USER = "NestorDHCP";
 ---
 
 <BaseLayout>
@@ -14,7 +12,7 @@ const snapshotUrl = `${import.meta.env.BASE_URL.replace(/\/$/, "")}/data/snapsho
 
   <main class="app" id="map">
     <!-- ─── The map ─── -->
-    <div class="stage" id="stage" data-state="loading" data-snapshot={snapshotUrl}>
+    <div class="stage" id="stage" data-state="loading" data-default-user={DEFAULT_USER}>
       <canvas id="canvas" class="stage__canvas"></canvas>
 
       <!-- Lightweight hover/focus feedback before committing to a click (REQ-20) -->
@@ -24,10 +22,10 @@ const snapshotUrl = `${import.meta.env.BASE_URL.replace(/\/$/, "")}/data/snapsho
         <div class="stage__veil">
           <div class="veil__inner">
             <p class="quiet">
-              The map is drawn in the browser, so it needs JavaScript. The
-              short version: 300 artists from my Last.fm history, sized by how
-              much I have played them and placed next to the artists the data
-              says they are most alike.
+              The map is built and drawn in the browser, so it needs
+              JavaScript. The short version: the 300 artists I have played
+              most on Last.fm, sized by how much I have played them and
+              placed next to the artists the data says they are most alike.
             </p>
           </div>
         </div>
@@ -37,8 +35,11 @@ const snapshotUrl = `${import.meta.env.BASE_URL.replace(/\/$/, "")}/data/snapsho
       <div class="stage__veil" id="veil">
         <div class="veil__inner">
           <div class="veil__pulse" aria-hidden="true"></div>
-          <p class="quiet" id="veil-text" role="status">Charting the galaxy…</p>
+          <p class="quiet" id="veil-text" role="status">Reading the scrobbles…</p>
           <p class="quiet veil__sub" id="veil-sub" hidden></p>
+          <button type="button" class="veil__retry" id="veil-retry" hidden>
+            Try another account
+          </button>
         </div>
       </div>
 
@@ -122,6 +123,9 @@ const snapshotUrl = `${import.meta.env.BASE_URL.replace(/\/$/, "")}/data/snapsho
       <p class="caption__scope" id="caption-scope">&nbsp;</p>
       <p class="caption__meta">
         <span id="caption-asof"></span>
+        <button type="button" class="caption__link" id="account-open">
+          Map another account
+        </button>
         <button
           type="button"
           class="caption__link"
@@ -131,6 +135,49 @@ const snapshotUrl = `${import.meta.env.BASE_URL.replace(/\/$/, "")}/data/snapsho
         >How this map works</button>
       </p>
     </div>
+
+    <!--
+      Whose map to draw. Any public Last.fm account works, because
+      user.getTopArtists is a public read — there is nothing to sign in to
+      and nothing leaves the browser.
+    -->
+    <dialog class="account" id="account">
+      <form method="dialog" class="account__form" id="account-form">
+        <h2 class="account__h">Whose listening history?</h2>
+        <p class="account__note">
+          Any public Last.fm account. There is no sign-in — the map is built
+          in your browser from the same public data the profile page shows.
+        </p>
+
+        <label class="sr-only" for="account-input">Last.fm username</label>
+        <input
+          class="account__input"
+          id="account-input"
+          name="user"
+          type="text"
+          placeholder="Last.fm username"
+          autocomplete="username"
+          spellcheck="false"
+          autocapitalize="none"
+          required
+        />
+        <p class="account__error" id="account-error" role="alert" hidden></p>
+
+        <div class="account__recent" id="account-recent" hidden>
+          <p class="account__recent-head">Already in this browser's cache</p>
+          <ul class="account__recent-list" id="account-recent-list"></ul>
+        </div>
+
+        <div class="account__actions">
+          <button type="button" class="account__btn" id="account-cancel">
+            Cancel
+          </button>
+          <button type="submit" class="account__btn account__btn--go">
+            Show this map
+          </button>
+        </div>
+      </form>
+    </dialog>
 
     <!-- ─── Method note ─── -->
     <section class="about" id="about" hidden aria-label="How this map works">
@@ -175,7 +222,7 @@ const snapshotUrl = `${import.meta.env.BASE_URL.replace(/\/$/, "")}/data/snapsho
             Grey bubbles are artists with no strong tie to anything else here.
           </dd>
 
-          <dt>How fresh it is</dt>
+          <dt>Where it comes from</dt>
           <dd id="about-fresh"></dd>
         </dl>
         <p class="about__foot">

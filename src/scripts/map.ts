@@ -1,62 +1,29 @@
 /**
  * Groove Galaxy — the map.
  *
- * Renders the precomputed snapshot (see scripts/build-snapshot.mjs) onto a
- * canvas and handles pan, zoom, hover, search, selection and the keyboard
- * route through it. No layout or similarity work happens here: positions,
- * sizes, groups and neighbour lists all arrive already computed, so the
- * runtime job is purely drawing and interaction.
+ * Draws a listening map onto a canvas and handles pan, zoom, hover, search,
+ * selection and the keyboard route through it. The map is built live in the
+ * browser (see lib/build.ts) rather than loaded from a precomputed file, so
+ * this also drives the layout while it settles: bubbles appear as soon as
+ * the artist list is known and visibly organise themselves over the next few
+ * seconds as similarity arrives.
  */
-
-/* ─── The snapshot's shape ───────────────────────────────────────────── */
-
-interface Similar {
-  id: number;
-  score: number;
-}
-
-interface Artist {
-  id: number;
-  name: string;
-  plays: number;
-  url: string;
-  image: string;
-  tags: string[];
-  x: number;
-  y: number;
-  r: number;
-  cluster: number;
-  similar: Similar[];
-}
-
-interface Cluster {
-  id: number;
-  color: string;
-  label: string;
-  size: number;
-  anchor: string;
-  plays: number;
-}
-
-interface Snapshot {
-  version: number;
-  generatedAt: string;
-  user: string;
-  profileUrl: string;
-  selection: {
-    period: string;
-    limit: number;
-    minPlays: number;
-    included: number;
-    totalScrobbledArtists: number;
-    description: string;
-  };
-  stats: { artists: number; edges: number; clusters: number };
-  bounds: { minX: number; minY: number; maxX: number; maxY: number };
-  clusters: Cluster[];
-  artists: Artist[];
-  edges: [number, number, number][];
-}
+import {
+  build,
+  EmptyHistoryError,
+  type Artist,
+  type BuildMeta,
+  type Cluster,
+} from "../lib/build";
+import * as cache from "../lib/cache";
+import { LastFmError, RATE_LIMITED, USER_NOT_FOUND } from "../lib/lastfm";
+import {
+  adjacency,
+  ForceLayout,
+  mdsSeed,
+  spiral,
+  type Edge,
+} from "../lib/layout";
 
 /* ─── Constants ──────────────────────────────────────────────────────── */
 
@@ -78,9 +45,19 @@ const THUMB_PX = "64s";
 const DETAIL_PX = "174s";
 /** On-screen radius past which the thumbnail stops being enough. */
 const UPGRADE_AT = 34;
-/** Parallel image requests. One host over HTTP/2, so this can be generous. */
-const MAX_CONCURRENT_IMAGES = 10;
+/**
+ * Parallel image requests. Prefetching 299 thumbnails is bound by round
+ * trips, not bandwidth — Last.fm's CDN averages ~200ms to first byte, so
+ * wall-clock time is essentially (299 / this number) × 200ms. It serves
+ * HTTP/2, where extra requests are extra streams on one connection rather
+ * than extra connections, so a higher number is close to free. Anyone
+ * behind an HTTP/1.1 proxy is capped at six by their browser regardless,
+ * and simply queues.
+ */
+const MAX_CONCURRENT_IMAGES = 24;
 const FLY_MS = 520;
+/** Per-frame budget for layout passes, leaving the rest of the frame to draw. */
+const LAYOUT_BUDGET_MS = 7;
 
 /* ─── Small helpers ──────────────────────────────────────────────────── */
 
@@ -110,27 +87,7 @@ function sized(url: string, size: string): string {
   return url.replace(/\/i\/u\/[^/]+\//, `/i/u/${size}/`);
 }
 
-function formatDate(iso: string): string {
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return "";
-  return d.toLocaleDateString("en-GB", {
-    day: "numeric",
-    month: "long",
-    year: "numeric",
-  });
-}
 
-function agoWords(iso: string): string {
-  const then = new Date(iso).getTime();
-  if (Number.isNaN(then)) return "";
-  const days = Math.floor((Date.now() - then) / 86400000);
-  if (days <= 0) return "today";
-  if (days === 1) return "yesterday";
-  if (days < 30) return `${days} days ago`;
-  const months = Math.round(days / 30.4);
-  if (months < 24) return `${months} month${months === 1 ? "" : "s"} ago`;
-  return `${Math.round(months / 12)} years ago`;
-}
 
 /* ─── Entry point ────────────────────────────────────────────────────── */
 
@@ -141,7 +98,13 @@ export function start(): void {
   const veilText = $<HTMLParagraphElement>("veil-text");
   const veilSub = $<HTMLParagraphElement>("veil-sub");
 
-  const url = stage.dataset.snapshot || "data/snapshot.json";
+  // Whose map. A `?user=` parameter already works, which is most of what a
+  // "show me mine" control will need; the default is the site owner's.
+  const params = new URLSearchParams(location.search);
+  const user =
+    (params.get("user") || "").trim() ||
+    stage.dataset.defaultUser ||
+    "NestorDHCP";
 
   /** REQ-24: never leave a blank canvas behind — say what happened. */
   function quiet(message: string, detail?: string) {
@@ -152,54 +115,260 @@ export function start(): void {
       veilSub.textContent = detail;
       veilSub.hidden = false;
     }
-    // The caption and method note are normally filled from the snapshot; with
-    // no snapshot they would sit blank, which reads as broken rather than quiet.
-    const fallback =
-      "Normally: the artists I have played most on Last.fm, sized by play count and placed next to whichever artists the data says they are most alike.";
     const scope = document.getElementById("caption-scope");
     const aboutScope = document.getElementById("about-scope");
     if (scope) scope.textContent = "Nothing to map right now.";
-    if (aboutScope) aboutScope.textContent = fallback;
+    if (aboutScope) {
+      aboutScope.textContent =
+        "Normally: the artists this account has played most on Last.fm, " +
+        "sized by play count and placed next to whichever artists the data " +
+        "says they are most alike.";
+    }
   }
 
-  fetch(url, { cache: "no-cache" })
-    .then((r) => {
-      if (!r.ok) throw new Error(`HTTP ${r.status}`);
-      return r.json() as Promise<Snapshot>;
+  const accounts = wireAccountSwitcher(user);
+  let map: MapView | null = null;
+
+  build(user, {
+    onArtists(artists, meta) {
+      map = boot(stage, canvas, veil, artists, meta);
+    },
+    onEdges(edges, done, total) {
+      map?.setEdges(edges, done, total);
+    },
+    onClusters(clusters) {
+      map?.setClusters(clusters);
+    },
+    onEnriched(artist) {
+      map?.refreshArtist(artist.id);
+    },
+    onLabels(clusters) {
+      map?.setClusters(clusters);
+    },
+  })
+    .then(() => {
+      accounts.remember(user);
+      map?.finish();
+      // Housekeeping only once nobody is waiting on the network.
+      void cache.sweep();
     })
-    .then((snap) => {
-      if (!snap || !Array.isArray(snap.artists) || snap.artists.length < 3) {
-        quiet(
-          "Not enough listening history to draw a map yet.",
-          "Come back once there are a few more scrobbles on the pile.",
-        );
+    .catch((err: unknown) => {
+      if (map) {
+        // The map is already usable; a late failure is not worth a takeover.
+        map.finish();
         return;
       }
-      boot(snap, stage, canvas, veil);
-    })
-    .catch(() => {
-      quiet(
-        "Couldn't load the map just now.",
-        "The snapshot of my Last.fm history didn't come back. Refreshing may help.",
-      );
+      if (err instanceof EmptyHistoryError) {
+        quiet(
+          "Not enough listening history to draw a map yet.",
+          `${user} needs a few more scrobbles on the pile before there is a shape to show.`,
+        );
+      } else if (err instanceof LastFmError && err.code === USER_NOT_FOUND) {
+        quiet(
+          "No Last.fm account by that name.",
+          `Last.fm doesn't know a user called "${user}".`,
+        );
+      } else if (err instanceof LastFmError && err.code === RATE_LIMITED) {
+        // The key is shared and read-only, so a busy spell is somebody
+        // else's map rather than anything this visitor did.
+        quiet(
+          "Last.fm is asking us to slow down.",
+          "Too many maps have been built in a short space of time. Waiting a minute and refreshing usually clears it.",
+        );
+      } else {
+        quiet(
+          "Couldn't reach Last.fm just now.",
+          "The map is built from live Last.fm data, and the request didn't come back. Refreshing may help.",
+        );
+      }
+      // Every failure gets a way forward — a dead end is never the right
+      // answer when picking a different account might just work.
+      accounts.offerRetry(user);
     });
+}
+
+/* ─── Choosing whose map to draw ─────────────────────────────────────── */
+
+/** Accounts whose maps this browser has already built, newest first. */
+const RECENTS_KEY = "groove-galaxy:recent-accounts";
+const MAX_RECENTS = 6;
+
+function readRecents(): string[] {
+  try {
+    const raw = localStorage.getItem(RECENTS_KEY);
+    const list: unknown = raw ? JSON.parse(raw) : [];
+    return Array.isArray(list)
+      ? list.filter((x): x is string => typeof x === "string")
+      : [];
+  } catch {
+    return []; // storage disabled — the feature simply isn't there
+  }
+}
+
+/**
+ * The account switcher.
+ *
+ * Wired up before the build starts and independent of it, because the case
+ * that most needs it is the one where the build failed: a mistyped username
+ * must offer a way to fix itself rather than being a dead end.
+ *
+ * Switching navigates rather than rebuilding in place — the URL is then the
+ * thing that identifies a map, so it can be shared, bookmarked and reached
+ * with the back button.
+ */
+function wireAccountSwitcher(current: string) {
+  const dialog = $<HTMLDialogElement>("account");
+  const form = $<HTMLFormElement>("account-form");
+  const input = $<HTMLInputElement>("account-input");
+  const error = $<HTMLParagraphElement>("account-error");
+  const recentWrap = $<HTMLDivElement>("account-recent");
+  const recentList = $<HTMLUListElement>("account-recent-list");
+  const retry = $<HTMLButtonElement>("veil-retry");
+
+  function show(prefill = "") {
+    error.hidden = true;
+    input.value = prefill;
+    renderRecents();
+    if (typeof dialog.showModal === "function") dialog.showModal();
+    else dialog.setAttribute("open", "");
+    input.focus();
+    input.select();
+  }
+
+  function renderRecents() {
+    const others = readRecents().filter(
+      (name) => name.toLowerCase() !== current.toLowerCase(),
+    );
+    recentList.replaceChildren();
+    if (!others.length) {
+      recentWrap.hidden = true;
+      return;
+    }
+    recentWrap.hidden = false;
+    for (const name of others) {
+      const li = document.createElement("li");
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "account__recent-btn";
+      btn.textContent = name;
+      // These are the maps that cost nothing to draw again.
+      btn.title = `Show ${name}'s map — already cached, so it loads instantly`;
+      btn.addEventListener("click", () => go(name));
+      li.append(btn);
+      recentList.append(li);
+    }
+  }
+
+  function go(name: string) {
+    const clean = name.trim();
+    if (!clean) return;
+    const url = new URL(location.href);
+    url.searchParams.set("user", clean);
+    location.assign(url.toString());
+  }
+
+  $<HTMLButtonElement>("account-open").addEventListener("click", () =>
+    show(current),
+  );
+  $<HTMLButtonElement>("account-cancel").addEventListener("click", () =>
+    dialog.close(),
+  );
+
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    const name = input.value.trim();
+    // Last.fm usernames are short and have no spaces; catching that here
+    // saves a round trip to be told the obvious.
+    if (!name || /\s/.test(name) || name.length > 30) {
+      error.textContent = "That doesn't look like a Last.fm username.";
+      error.hidden = false;
+      input.focus();
+      return;
+    }
+    go(name);
+  });
+
+  return {
+    /** Offer the switcher from a failed build, prefilled with what failed. */
+    offerRetry(prefill = "") {
+      retry.hidden = false;
+      retry.onclick = () => show(prefill);
+    },
+    /** Only remember an account whose map actually built. */
+    remember(name: string) {
+      try {
+        const next = [
+          name,
+          ...readRecents().filter(
+            (x) => x.toLowerCase() !== name.toLowerCase(),
+          ),
+        ].slice(0, MAX_RECENTS);
+        localStorage.setItem(RECENTS_KEY, JSON.stringify(next));
+      } catch {
+        /* storage disabled; the switcher still works, just without history */
+      }
+    },
+  };
 }
 
 /* ─── The map proper ─────────────────────────────────────────────────── */
 
+/** What `start()` keeps hold of so it can feed the map as data arrives. */
+interface MapView {
+  setEdges(edges: Edge[], done: number, total: number): void;
+  setClusters(clusters: Cluster[]): void;
+  refreshArtist(id: number): void;
+  finish(): void;
+}
+
 function boot(
-  snap: Snapshot,
   stage: HTMLDivElement,
   canvas: HTMLCanvasElement,
   veil: HTMLDivElement,
-): void {
+  artists: Artist[],
+  meta: BuildMeta,
+): MapView {
   const ctx = canvas.getContext("2d", { alpha: false })!;
-  const artists = snap.artists;
   const byId = new Map(artists.map((a) => [a.id, a]));
+  let clusters: Cluster[] = [];
   const colorOf = (a: Artist) =>
-    a.cluster >= 0 && snap.clusters[a.cluster]
-      ? snap.clusters[a.cluster].color
+    a.cluster >= 0 && clusters[a.cluster]
+      ? clusters[a.cluster].color
       : UNCLUSTERED;
+
+  /* ── the live layout ────────────────────────────────────────────────
+     Everyone starts on an even spiral, which already reads as a map, and
+     is pulled into shape as similarity arrives.                         */
+
+  const radii = artists.map((a) => a.r);
+  const layout = new ForceLayout();
+  layout.reset(spiral(artists.length, Math.max(...radii) * 1.6), radii);
+  syncPositions();
+
+  function syncPositions() {
+    for (let i = 0; i < artists.length; i++) {
+      artists[i].x = layout.pos[i].x;
+      artists[i].y = layout.pos[i].y;
+    }
+  }
+
+  /** Bubbles move, so the extent has to be recomputed rather than read. */
+  let bounds = { minX: -1, maxX: 1, minY: -1, maxY: 1 };
+  function measure() {
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+    for (const a of artists) {
+      if (a.x - a.r < minX) minX = a.x - a.r;
+      if (a.x + a.r > maxX) maxX = a.x + a.r;
+      if (a.y - a.r < minY) minY = a.y - a.r;
+      if (a.y + a.r > maxY) maxY = a.y + a.r;
+    }
+    const pad = Math.max(...radii);
+    bounds = {
+      minX: minX - pad, maxX: maxX + pad,
+      minY: minY - pad, maxY: maxY + pad,
+    };
+  }
+  measure();
 
   /* ── viewport ───────────────────────────────────────────────────── */
 
@@ -218,7 +387,7 @@ function boot(
   const toWorldY = (sy: number) => (sy - height / 2) / view.scale + view.cy;
 
   function computeHome() {
-    const { minX, maxX, minY, maxY } = snap.bounds;
+    const { minX, maxX, minY, maxY } = bounds;
     const w = Math.max(maxX - minX, 1);
     const h = Math.max(maxY - minY, 1);
     fitScale = Math.min(width / w, height / h) * 0.94;
@@ -297,8 +466,16 @@ function boot(
   const jobKey = (id: number, detail: boolean) =>
     `${id}:${detail ? "d" : "t"}`;
 
+  /** Honour a visitor who has asked their browser to save data. */
+  const saveData = Boolean(
+    (navigator as Navigator & { connection?: { saveData?: boolean } })
+      .connection?.saveData,
+  );
+
   function enqueue(a: Artist, detail: boolean) {
     if (!a.image) return;
+    // Under Save-Data, only fetch art for a bubble big enough to warrant it.
+    if (saveData && !detail) return;
     const key = jobKey(a.id, detail);
     if (queued.has(key) || imageFailed.has(key)) return;
     const held = images.get(a.id);
@@ -382,18 +559,6 @@ function boot(
     }
   }
 
-  /**
-   * Warm every artist's thumbnail up front, so the map is illustrated
-   * before anyone zooms rather than because they did. Skipped when the
-   * visitor has asked their browser to save data.
-   */
-  function prefetchArtwork() {
-    const conn = (
-      navigator as Navigator & { connection?: { saveData?: boolean } }
-    ).connection;
-    if (conn && conn.saveData) return;
-    for (const a of artists) enqueue(a, false);
-  }
 
   /* ── drawing ────────────────────────────────────────────────────── */
 
@@ -789,8 +954,8 @@ function boot(
     kicker.append(
       swatch,
       document.createTextNode(
-        a.cluster >= 0 && snap.clusters[a.cluster]
-          ? snap.clusters[a.cluster].label
+        a.cluster >= 0 && clusters[a.cluster]
+          ? clusters[a.cluster].label
           : "no strong ties on this map",
       ),
     );
@@ -900,11 +1065,7 @@ function boot(
       const btn = document.createElement("button");
       btn.type = "button";
       btn.setAttribute("aria-pressed", "false");
-      const group =
-        a.cluster >= 0 && snap.clusters[a.cluster]
-          ? `, in the ${snap.clusters[a.cluster].label} group`
-          : ", not close to any group";
-      btn.textContent = `${a.name}, ${plural(a.plays, "play")}${group}`;
+      btn.textContent = `${a.name}, ${plural(a.plays, "play")}${groupPhrase(a)}`;
       btn.addEventListener("focus", () => {
         focused = a;
         flyToArtist(a);
@@ -927,6 +1088,30 @@ function boot(
       frag.append(li);
     }
     a11yList.append(frag);
+  }
+
+  /**
+   * A group is named either after a tag ("french") or, before tags land,
+   * after the artist at its heart ("around L'Impératrice") — which needs a
+   * different sentence around it to read as English.
+   */
+  function groupPhrase(a: Artist) {
+    const label = a.cluster >= 0 && clusters[a.cluster]
+      ? clusters[a.cluster].label
+      : "";
+    if (!label) return ", not close to any group";
+    return label.startsWith("around ")
+      ? `, in the group ${label}`
+      : `, in the ${label} group`;
+  }
+
+  /** Group names only exist once clustering has run; refresh them then. */
+  function rebuildA11yLabels() {
+    for (const [id, btn] of a11yButtons) {
+      const a = byId.get(id);
+      if (!a) continue;
+      btn.textContent = `${a.name}, ${plural(a.plays, "play")}${groupPhrase(a)}`;
+    }
   }
 
   function syncA11y() {
@@ -1084,10 +1269,13 @@ function boot(
   const legendToggle = $<HTMLButtonElement>("legend-toggle");
   const legendBody = $<HTMLDivElement>("legend-body");
   const legendList = $<HTMLUListElement>("legend-list");
+  let legendWired = false;
 
-  if (snap.clusters.length) {
+  function renderLegend() {
+    if (!clusters.length) return;
     legend.hidden = false;
-    for (const c of snap.clusters) {
+    legendList.replaceChildren();
+    for (const c of clusters) {
       const li = el("li", "legend__item");
       const btn = el("button", "legend__btn");
       btn.type = "button";
@@ -1103,7 +1291,9 @@ function boot(
       );
       btn.addEventListener("click", () => {
         const ids = artists.filter((a) => a.cluster === c.id).map((a) => a.id);
-        const already = matches && ids.every((id) => matches!.has(id)) &&
+        const already =
+          matches &&
+          ids.every((id) => matches!.has(id)) &&
           matches!.size === ids.length;
         matches = already ? null : new Set(ids);
         legendList.querySelectorAll(".legend__btn").forEach((b) => {
@@ -1115,8 +1305,9 @@ function boot(
       li.append(btn);
       legendList.append(li);
     }
-    // Roomy screens can afford the legend open; it is what explains the
-    // colours, and a collapsed panel just hides that.
+
+    if (legendWired) return;
+    legendWired = true;
     if (window.matchMedia("(min-width: 60rem)").matches) {
       legendToggle.setAttribute("aria-expanded", "true");
       legendBody.hidden = false;
@@ -1128,24 +1319,31 @@ function boot(
     });
   }
 
-  /* ── caption + method note (REQ-3, REQ-25) ──────────────────────── */
+  /* ── caption + method note (REQ-3) ──────────────────────────────── */
 
-  $<HTMLParagraphElement>("caption-scope").textContent =
-    snap.selection.description;
-  $<HTMLElement>("about-scope").textContent = snap.selection.description;
-
-  const asOf = formatDate(snap.generatedAt);
-  const ago = agoWords(snap.generatedAt);
-  $<HTMLSpanElement>("caption-asof").textContent = asOf
-    ? `Snapshot as of ${asOf}`
-    : "Snapshot date unknown";
-  $<HTMLElement>("about-fresh").textContent = asOf
-    ? `This is a snapshot, not a live feed — it was taken on ${asOf} (${ago}) and is rebuilt from Last.fm on a schedule. A track played this morning won't be on it.`
-    : "This is a snapshot rebuilt from Last.fm on a schedule, not a live feed.";
+  const captionScope = $<HTMLParagraphElement>("caption-scope");
+  const captionState = $<HTMLSpanElement>("caption-asof");
+  captionScope.textContent = meta.description;
+  $<HTMLElement>("about-scope").textContent = meta.description;
+  $<HTMLElement>("about-fresh").textContent =
+    "It is built from Last.fm the moment you open the page, so it is as " +
+    "current as your scrobbles are. Nothing is precomputed and there is no " +
+    "server in between — your browser does the fetching and the layout. " +
+    "What it has already looked up is kept in this browser, so coming back " +
+    "is close to instant.";
 
   const profile = $<HTMLAnchorElement>("about-profile");
-  profile.href = snap.profileUrl;
-  profile.textContent = `${snap.user} on Last.fm ↗`;
+  profile.href = meta.profileUrl;
+  profile.textContent = `${meta.user} on Last.fm ↗`;
+
+  // A shared link should say whose map it opens.
+  document.title = `${meta.user}'s listening map · Groove Galaxy`;
+
+  /** The live status line: what the map is still waiting for. */
+  function setState(text: string) {
+    captionState.textContent = text;
+  }
+  setState(`Reading ${meta.user}'s listening history…`);
 
   const aboutToggle = $<HTMLButtonElement>("about-toggle");
   const about = $<HTMLElement>("about");
@@ -1156,6 +1354,93 @@ function boot(
     if (!open) about.scrollIntoView({ behavior: "smooth", block: "nearest" });
   });
 
+  /* ── settling ────────────────────────────────────────────────────
+     While the layout is still moving the map re-frames itself, so the
+     visitor watches it organise rather than watching it wander off the
+     edge. The moment they touch it, it is theirs and it stops.          */
+
+  let following = true;
+  let settling = false;
+
+  function stopFollowing() {
+    following = false;
+  }
+  canvas.addEventListener("pointerdown", stopFollowing);
+  canvas.addEventListener("wheel", stopFollowing, { passive: true });
+
+  function settleFrame() {
+    if (!settling) return;
+    layout.step(LAYOUT_BUDGET_MS);
+    layout.centre();
+    syncPositions();
+    measure();
+    computeHome();
+    if (following) {
+      view.cx = home.cx;
+      view.cy = home.cy;
+      view.scale = home.scale;
+    }
+    draw();
+    if (layout.settled) {
+      settling = false;
+      reprioritise();
+    } else {
+      requestAnimationFrame(settleFrame);
+    }
+  }
+
+  function nudge() {
+    if (settling) return;
+    settling = true;
+    requestAnimationFrame(settleFrame);
+  }
+
+  /* ── what start() feeds in as the build progresses ───────────────── */
+
+  const view_: MapView = {
+    setEdges(edges, done, total) {
+      // Re-seed from the graph's own shape the first time it is worth it:
+      // MDS gives the global arrangement that the force pass then refines.
+      if (!seeded && done >= total) {
+        seeded = true;
+        const adj = adjacency(artists.length, edges);
+        layout.reset(mdsSeed(artists.length, adj), radii);
+      }
+      layout.setEdges(edges);
+      nudge();
+      setState(
+        done < total
+          ? `Placing artists — ${done} of ${total}`
+          : "Settling…",
+      );
+    },
+
+    setClusters(next) {
+      clusters = next;
+      renderLegend();
+      if (selected) renderDetail(selected);
+      rebuildA11yLabels();
+      draw();
+    },
+
+    refreshArtist(id) {
+      const a = byId.get(id);
+      if (a && a.image) enqueue(a, false);
+      if (selected && selected.id === id) renderDetail(selected);
+      draw();
+    },
+
+    finish() {
+      const cached = cache.summary();
+      setState(
+        `Live from Last.fm · ${artists.length} artists` +
+          (cached ? ` · ${cached}` : ""),
+      );
+      nudge();
+    },
+  };
+  let seeded = false;
+
   /* ── go ─────────────────────────────────────────────────────────── */
 
   const observer = new ResizeObserver(resize);
@@ -1165,8 +1450,10 @@ function boot(
   );
 
   resize();
-  prefetchArtwork();
   stage.dataset.state = "ready";
   veil.hidden = true;
   canvas.style.cursor = "grab";
+  nudge();
+
+  return view_;
 }

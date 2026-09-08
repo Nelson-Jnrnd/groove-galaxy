@@ -1,16 +1,14 @@
 {
   "name": "groove-galaxy",
   "version": "1.0.0",
-  "description": "An explorable map of Nelson Jeanrenaud's Last.fm listening history — one bubble per artist, sized by plays, placed by data-derived similarity.",
+  "description": "An explorable map of Nelson Jeanrenaud's Last.fm listening history \u2014 one bubble per artist, sized by plays, placed by data-derived similarity.",
   "type": "module",
   "scripts": {
     "dev": "astro dev",
     "start": "astro dev",
     "build": "astro build",
     "preview": "astro preview",
-    "check": "astro check",
-    "snapshot": "node scripts/build-snapshot.mjs",
-    "snapshot:layout": "node scripts/build-snapshot.mjs --offline"
+    "check": "astro check"
   },
   "license": "MIT",
   "devDependencies": {
