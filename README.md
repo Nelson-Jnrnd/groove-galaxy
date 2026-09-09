@@ -85,8 +85,8 @@ Ordered so that the map exists long before it is finished:
    restricted to artists *also on this map*. Edges accumulate, and the force
    simulation runs a few passes per frame, so the map visibly reorganises
    itself from a ring into clusters instead of appearing after a freeze.
-3. **Groups** — label propagation over the finished graph, which is what
-   colours the bubbles.
+3. **Groups** — Louvain community detection over the finished graph, which
+   is what colours the bubbles.
 4. **Tags and artwork** — fetched afterwards, in the background, behind the
    foreground work in the same request pool. Groups are named after their
    heaviest artist until tags arrive and a better name can be derived.
