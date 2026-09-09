@@ -159,52 +159,159 @@ export function mdsSeed(n: number, adj: Neighbour[][], seed = 1): Point[] {
 }
 
 /**
- * Label propagation over the weighted similarity graph — the emergent
- * grouping behind cluster colour. Deterministic: nodes are visited in a
- * fixed shuffled order and ties break on the lowest label.
+ * Louvain community detection over the weighted similarity graph — the
+ * emergent grouping behind cluster colour. Each pass moves every node into
+ * whichever neighbouring community raises modularity the most (edge weight
+ * inside communities relative to what the nodes' degrees alone would
+ * predict), then collapses each community into one node of a smaller graph
+ * and repeats — so it keeps merging at coarser and coarser scales for as
+ * long as merging is still an improvement, rather than settling on
+ * whatever first, single-scale grouping a flatter algorithm finds.
+ * Deterministic: nodes are visited in a fixed shuffled order and ties break
+ * on the lowest community id.
  *
  * Nothing here reads a genre, a tag or any human-authored category; the
  * groups fall out of who-is-similar-to-whom alone (REQ-10).
  */
-export function labelPropagation(
+export function louvain(
   n: number,
   adj: Neighbour[][],
-  { seed = 11, rounds = 60 }: { seed?: number; rounds?: number } = {},
+  { seed = 11 }: { seed?: number } = {},
 ): Int32Array {
-  const labels = new Int32Array(n);
-  for (let i = 0; i < n; i++) labels[i] = i;
+  const membership = new Int32Array(n);
+  for (let i = 0; i < n; i++) membership[i] = i;
+  if (n === 0) return membership;
+
+  const random = rng(seed);
+  let levelAdj = adj;
+  let levelN = n;
+  let levelSelf: Float64Array = new Float64Array(n);
+
+  // Each pass works on a smaller graph than the last (one node per
+  // community found so far), so this converges quickly even though the
+  // cap looks generous relative to the original artist count.
+  for (let level = 0; level < 20; level++) {
+    const localLabels = localMove(levelN, levelAdj, levelSelf, random);
+
+    const compact = new Map<number, number>();
+    for (const label of localLabels) {
+      if (!compact.has(label)) compact.set(label, compact.size);
+    }
+    for (let i = 0; i < n; i++) {
+      membership[i] = compact.get(localLabels[membership[i]])!;
+    }
+    if (compact.size === levelN) break; // nothing merged this pass
+
+    const next = aggregate(levelN, levelAdj, levelSelf, localLabels, compact);
+    levelAdj = next.adj;
+    levelSelf = next.self;
+    levelN = compact.size;
+  }
+
+  return membership;
+}
+
+/**
+ * One Louvain local-moving phase: repeatedly relocate each node to whichever
+ * community (its own current one, or a neighbour's) most increases
+ * modularity, until a full pass moves nothing.
+ */
+function localMove(
+  n: number,
+  adj: Neighbour[][],
+  selfWeight: Float64Array,
+  random: () => number,
+): Int32Array {
+  const label = new Int32Array(n);
+  const degree = new Float64Array(n);
+  for (let i = 0; i < n; i++) {
+    label[i] = i;
+    let d = 2 * selfWeight[i];
+    for (const { w } of adj[i]) d += w;
+    degree[i] = d;
+  }
+  // Σ_tot per community, communities keyed by the node id that seeded them.
+  const commWeight = degree.slice();
+  const twoM = degree.reduce((s, d) => s + d, 0) || 1;
 
   const order = Array.from({ length: n }, (_, i) => i);
-  const random = rng(seed);
   for (let i = order.length - 1; i > 0; i--) {
     const j = Math.floor(random() * (i + 1));
     [order[i], order[j]] = [order[j], order[i]];
   }
 
-  for (let round = 0; round < rounds; round++) {
-    let changed = 0;
+  for (let pass = 0; pass < 40; pass++) {
+    let moved = 0;
     for (const i of order) {
-      if (!adj[i].length) continue;
-      const scores = new Map<number, number>();
+      const current = label[i];
+      commWeight[current] -= degree[i];
+
+      const linkTo = new Map<number, number>();
       for (const { j, w } of adj[i]) {
-        scores.set(labels[j], (scores.get(labels[j]) || 0) + w);
+        linkTo.set(label[j], (linkTo.get(label[j]) || 0) + w);
       }
-      let best = labels[i];
-      let bestScore = -Infinity;
-      for (const [label, score] of scores) {
-        if (score > bestScore || (score === bestScore && label < best)) {
-          best = label;
-          bestScore = score;
+
+      let best = current;
+      let bestGain =
+        (linkTo.get(current) || 0) - (degree[i] * commWeight[current]) / twoM;
+      for (const [comm, weight] of linkTo) {
+        if (comm === current) continue;
+        const gain = weight - (degree[i] * commWeight[comm]) / twoM;
+        if (gain > bestGain || (gain === bestGain && comm < best)) {
+          best = comm;
+          bestGain = gain;
         }
       }
-      if (best !== labels[i]) {
-        labels[i] = best;
-        changed++;
+
+      commWeight[best] += degree[i];
+      if (best !== current) {
+        label[i] = best;
+        moved++;
       }
     }
-    if (!changed) break;
+    if (!moved) break;
   }
-  return labels;
+  return label;
+}
+
+/**
+ * Collapse the communities `localMove` found into single nodes: internal
+ * edges become self-weight (kept for the next level's modularity maths),
+ * and edges crossing communities are summed onto the pair of new nodes.
+ */
+function aggregate(
+  n: number,
+  adj: Neighbour[][],
+  selfWeight: Float64Array,
+  label: Int32Array,
+  compact: Map<number, number>,
+): { adj: Neighbour[][]; self: Float64Array } {
+  const size = compact.size;
+  const self = new Float64Array(size);
+  const cross = new Map<string, number>();
+
+  for (let i = 0; i < n; i++) {
+    const ci = compact.get(label[i])!;
+    self[ci] += selfWeight[i];
+    for (const { j, w } of adj[i]) {
+      if (j <= i) continue; // each undirected edge counted from one side only
+      const cj = compact.get(label[j])!;
+      if (ci === cj) {
+        self[ci] += w;
+      } else {
+        const key = ci < cj ? `${ci}:${cj}` : `${cj}:${ci}`;
+        cross.set(key, (cross.get(key) || 0) + w);
+      }
+    }
+  }
+
+  const nextAdj: Neighbour[][] = Array.from({ length: size }, () => []);
+  for (const [key, w] of cross) {
+    const [a, b] = key.split(":").map(Number);
+    nextAdj[a].push({ j: b, w });
+    nextAdj[b].push({ j: a, w });
+  }
+  return { adj: nextAdj, self };
 }
 
 /**

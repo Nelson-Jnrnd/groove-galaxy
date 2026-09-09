@@ -11,7 +11,7 @@
  *   4. tags and cover art arrive afterwards, enriching a map already in use.
  */
 import * as api from "./lastfm";
-import { adjacency, labelPropagation, type Edge } from "./layout";
+import { adjacency, louvain, type Edge } from "./layout";
 
 export interface Artist {
   id: number;
@@ -238,12 +238,12 @@ function attachNeighbours(artists: Artist[], pairs: Map<string, number>) {
   });
 }
 
-/** Label propagation over the similarity graph — emergent, not authored. */
+/** Louvain community detection over the similarity graph — emergent, not authored. */
 function group(
   artists: Artist[],
   adj: { j: number; w: number }[][],
 ): Cluster[] {
-  const labels = labelPropagation(artists.length, adj);
+  const labels = louvain(artists.length, adj);
   const groups = new Map<number, number[]>();
   for (let i = 0; i < artists.length; i++) {
     const key = adj[i].length ? labels[i] : -1;
