@@ -58,12 +58,18 @@ const EDGES_PER_ARTIST = 10;
 /** Below this match score an edge is too weak to mean anything. */
 const MIN_MATCH = 0.05;
 /**
- * A tag can't name a group unless it actually holds for most of it — short
- * of this share of members, the name would claim something true of a
- * minority and misleading for the rest (e.g. two British-tagged members
- * naming a ten-artist group that is mostly something else).
+ * At or above this share of members, a tag names the group outright — it
+ * genuinely holds for most of it.
  */
 const MIN_LABEL_SHARE = 0.4;
+/**
+ * Below MIN_LABEL_SHARE but at or above this, a tag still says something
+ * real about part of the group, so it's shown with its share attached
+ * ("pop · 35%") rather than stated as if it covered everyone. Below this
+ * floor a tag is too thin to be worth naming at all, and the label falls
+ * back to the group's own artists instead.
+ */
+const MIN_QUALIFIED_SHARE = 0.2;
 
 /** Muted, tuned for the off-black ground, assigned by group size (OQ-8). */
 const PALETTE = [
@@ -268,6 +274,25 @@ function group(
 }
 
 /**
+ * Name a group by its own artists, for when no tag is common enough among
+ * its members to name it honestly. The two most-played, plus a count of the
+ * rest — cheap to read, and it can't claim anything the group doesn't
+ * actually contain.
+ */
+function fallbackLabel(members: Artist[]): string {
+  const byPlays = [...members].sort((a, b) => b.plays - a.plays);
+  if (byPlays.length <= 3) {
+    const names = byPlays.map((a) => a.name);
+    return names.length === 1
+      ? names[0]
+      : `${names.slice(0, -1).join(", ")} & ${names[names.length - 1]}`;
+  }
+  const [first, second] = byPlays;
+  const rest = byPlays.length - 2;
+  return `${first.name}, ${second.name} & ${rest} other${rest === 1 ? "" : "s"}`;
+}
+
+/**
  * Cover art and tags, fetched once the map is already on screen. Tags then
  * upgrade each group's name from its anchor artist to whichever tag is most
  * distinctive to its members (OQ-4) — common inside the group and rare
@@ -315,21 +340,28 @@ async function enrich(
     }
     let best = "";
     let bestScore = 0;
+    let bestShare = 0;
     for (const [tag, count] of local) {
       if (count < 2) continue;
       const share = count / members.length;
-      if (share < MIN_LABEL_SHARE) continue;
+      if (share < MIN_QUALIFIED_SHARE) continue;
       const distinctiveness = count / (globalCounts.get(tag) || count);
       const score = share * Math.pow(distinctiveness, 1.5);
       if (score > bestScore) {
         bestScore = score;
         best = tag;
+        bestShare = share;
       }
     }
-    if (best) {
-      cluster.label = best;
-      improved = true;
-    }
+    // A tag that only covers part of the group says so, rather than
+    // reading as if it covered everyone; a group with no tag common enough
+    // to be worth naming is named after its own artists instead.
+    cluster.label = !best
+      ? fallbackLabel(members)
+      : bestShare >= MIN_LABEL_SHARE
+        ? best
+        : `${best} · ${Math.round(bestShare * 100)}%`;
+    improved = true;
   }
   if (improved) events.onLabels(clusters);
 
