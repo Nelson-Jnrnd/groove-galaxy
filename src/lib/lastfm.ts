@@ -289,6 +289,59 @@ export async function weeklyChartList(user: string): Promise<ChartWeek[]> {
 }
 
 /**
+ * When this account's history actually begins, in unix seconds — or 0 when
+ * that can't be established.
+ *
+ * `user.getWeeklyChartList` answers with every week since the account was
+ * *created*, which for a long-dormant registration can be two decades of
+ * weeks that provably contain nothing: one measured account lists 1,125
+ * weeks and started scrobbling in week 843. Fetching those charts costs a
+ * request each to be told "nothing", which is most of what makes a first
+ * timeline slow.
+ *
+ * The recent-tracks feed is paginated newest-first and reports its own page
+ * count, so the oldest scrobble is exactly two requests away: one for the
+ * total, one for the last page. Exact, not a heuristic — no week that could
+ * contain listening is skipped.
+ */
+export async function firstScrobble(user: string): Promise<number> {
+  return cached("first", user, async () => {
+    const head = await call(
+      { method: "user.getrecenttracks", user, limit: "1" },
+      false,
+    ).catch(() => null);
+    const attr = (
+      head?.recenttracks as { "@attr"?: { totalPages?: string } } | undefined
+    )?.["@attr"];
+    const pages = Number(attr?.totalPages) || 0;
+    if (pages < 1) return 0;
+
+    const tail = await call(
+      {
+        method: "user.getrecenttracks",
+        user,
+        limit: "1",
+        page: String(pages),
+      },
+      false,
+    ).catch(() => null);
+    const track = list<{ date?: { uts?: string } }>(
+      (tail?.recenttracks as { track?: unknown } | undefined)?.track,
+    )[0];
+    // A track with no date is the one playing right now, which cannot be the
+    // oldest unless it is also the only one — either way, 0 means "don't
+    // trim", and a whole history is read rather than risking losing any of it.
+    return Number(track?.date?.uts) || 0;
+  });
+}
+
+/** The weeks that could contain listening, given a known first scrobble. */
+export function weeksSince(weeks: ChartWeek[], first: number): ChartWeek[] {
+  if (!(first > 0)) return weeks;
+  return weeks.filter((w) => w.to >= first);
+}
+
+/**
  * What an account played during one historical week.
  *
  * A week that has already ended can never change, so it is filed under a

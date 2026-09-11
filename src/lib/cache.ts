@@ -45,21 +45,71 @@ export const TTL = {
   chart: 10 * 365 * 24 * 3600e3,
   /** …whereas the week in progress is still being scrobbled into. */
   chartLive: 30 * 60e3,
+  /**
+   * A whole year, already added up out of its weeks. Derived rather than
+   * fetched, but derived from weeks that can never change again — so it is
+   * worth keeping for the same long time, and it saves re-reading and
+   * re-summing fifty-two entries to learn the same thing twice.
+   */
+  frame: 10 * 365 * 24 * 3600e3,
+  /**
+   * When an account's listening started. It can only ever move earlier by
+   * someone importing old scrobbles, and a week either way costs nothing, so
+   * a week is a fine life for it.
+   */
+  first: 7 * 24 * 3600e3,
 } as const;
 
 export type Kind = keyof typeof TTL;
 
-interface Entry<T> {
+export interface Entry<T> {
   key: string;
   kind: Kind;
   value: T;
   storedAt: number;
   /** Last read, for eviction — the useful entries are the re-read ones. */
   usedAt: number;
+  /** Roughly how much room this takes, measured when it was written. */
+  bytes?: number;
 }
 
-/** Above this, the least recently used entries are dropped. */
-const MAX_ENTRIES = 4000;
+/**
+ * What a cached entry is worth keeping, highest first.
+ *
+ * Counting entries alone treats a 40-name similarity list and a 15 kB weekly
+ * chart as the same thing, and least-recently-used alone would let one
+ * account's decade of history evict the similarity data every map in this
+ * browser is built on — which costs one cheap request to refetch versus three
+ * hundred expensive ones. So eviction spends the cheap entries first.
+ */
+const KEEP: Record<Kind, number> = {
+  /** The week in progress is stale within the hour anyway. */
+  chartLive: 0,
+  /** One request each, and once a year has been added up, redundant. */
+  chart: 1,
+  /** One request each, and the ones that must stay current regardless. */
+  top: 2,
+  charts: 2,
+  /** Two requests, and it saves hundreds of them. */
+  first: 5,
+  /** Enrichment: a map is perfectly usable without it. */
+  art: 3,
+  tags: 4,
+  /** Fifty-two charts, already added up. */
+  frame: 5,
+  /** The expensive one, and the same answer for every account. */
+  similar: 6,
+};
+
+/**
+ * Two budgets, because entries differ in size by two orders of magnitude. A
+ * single account's timeline is already ~1,100 weekly charts, so the old
+ * 4,000-entry ceiling was one account away from evicting everything else.
+ */
+const MAX_ENTRIES = 8000;
+const MAX_BYTES = 40 * 1024 * 1024;
+/** What to assume for entries written before sizes were recorded. */
+const ASSUMED_BYTES = 2048;
 
 let dbPromise: Promise<IDBDatabase | null> | null = null;
 
@@ -131,8 +181,56 @@ export async function set<T>(kind: Kind, id: string, value: T): Promise<void> {
   stats.writes++;
   const now = Date.now();
   await idb("readwrite", (s) =>
-    s.put({ key: keyOf(kind, id), kind, value, storedAt: now, usedAt: now }),
+    s.put({
+      key: keyOf(kind, id),
+      kind,
+      value,
+      storedAt: now,
+      usedAt: now,
+      bytes: sizeOf(value),
+    }),
   );
+}
+
+/**
+ * A rough byte count for the eviction budget. Stringifying is cheap next to
+ * the request that produced the value, and being wrong by a factor of two
+ * here only shifts when housekeeping runs.
+ */
+function sizeOf(value: unknown): number {
+  try {
+    return JSON.stringify(value, (_k, v) =>
+      v instanceof Map ? [...v] : v,
+    ).length;
+  } catch {
+    return ASSUMED_BYTES;
+  }
+}
+
+/**
+ * Which entries to drop to get back inside both budgets: cheapest kind
+ * first, and within a kind the least recently used. Pure, so the policy can
+ * be tested without a browser.
+ */
+export function evictionOrder(
+  entries: Entry<unknown>[],
+  { maxEntries = MAX_ENTRIES, maxBytes = MAX_BYTES } = {},
+): string[] {
+  let count = entries.length;
+  let bytes = entries.reduce((s, e) => s + (e.bytes ?? ASSUMED_BYTES), 0);
+  if (count <= maxEntries && bytes <= maxBytes) return [];
+
+  const order = [...entries].sort(
+    (a, b) => KEEP[a.kind] - KEEP[b.kind] || a.usedAt - b.usedAt,
+  );
+  const doomed: string[] = [];
+  for (const e of order) {
+    if (count <= maxEntries && bytes <= maxBytes) break;
+    doomed.push(e.key);
+    count--;
+    bytes -= e.bytes ?? ASSUMED_BYTES;
+  }
+  return doomed;
 }
 
 /**
@@ -155,12 +253,7 @@ export async function sweep(): Promise<void> {
         if (now - e.storedAt > (TTL[e.kind] ?? 0)) store.delete(e.key);
         else live.push(e);
       }
-      if (live.length > MAX_ENTRIES) {
-        live.sort((a, b) => a.usedAt - b.usedAt);
-        for (const e of live.slice(0, live.length - MAX_ENTRIES)) {
-          store.delete(e.key);
-        }
-      }
+      for (const key of evictionOrder(live)) store.delete(key);
       resolve();
     };
   });

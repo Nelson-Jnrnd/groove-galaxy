@@ -14,6 +14,7 @@
  * (TE-REQ-1). It is deterministic, it is symmetric — a week gives away as
  * often as it takes — and it is disclosed in the method note (TE-REQ-2).
  */
+import * as cache from "./cache.ts";
 import * as api from "./lastfm.ts";
 import type { ChartWeek, TopArtist } from "./lastfm.ts";
 
@@ -131,6 +132,36 @@ export function aggregateFrame(id: string, charts: WeekChart[]): TemporalFrame {
   };
 }
 
+/**
+ * A finished year is as immutable as the weeks inside it, so it is worth
+ * keeping as one entry rather than re-reading and re-summing fifty-two.
+ *
+ * The key names the exact weeks that produced it: if the set of weeks the
+ * timeline considers ever changes — a different resolution, or a first
+ * scrobble that moves — the old aggregate simply doesn't match and is not
+ * used.
+ */
+export function frameKey(
+  user: string,
+  resolution: Resolution,
+  id: string,
+  weeks: ChartWeek[],
+): string {
+  const from = weeks.length ? weeks[0].from : 0;
+  const to = weeks.length ? weeks[weeks.length - 1].to : 0;
+  return `${user}|${resolution}|${id}|${weeks.length}|${from}-${to}`;
+}
+
+/**
+ * Can this frame be kept forever? Only if every week in it was read and
+ * every week in it is over — a year still being scrobbled into is a moving
+ * target, and a frame with a hole in it must not be mistaken later for a
+ * complete count (TE-REQ-36).
+ */
+export function isSettled(frame: TemporalFrame, now = Date.now()): boolean {
+  return frame.complete && frame.to * 1000 < now;
+}
+
 /* ─── fetching, progressively ────────────────────────────────────────── */
 
 export interface HistoryEvents {
@@ -179,7 +210,13 @@ export async function loadHistory(
     cancelled?: () => boolean;
   } = {},
 ): Promise<Map<string, TemporalFrame>> {
-  const weeks = await api.weeklyChartList(user);
+  // Two requests to learn where the listening starts, so that the hundreds
+  // of weeks before it are never asked for at all.
+  const [listed, first] = await Promise.all([
+    api.weeklyChartList(user),
+    api.firstScrobble(user).catch(() => 0),
+  ]);
+  const weeks = api.weeksSince(listed, first);
   const grouped = groupWeeks(weeks, resolution);
   const ids = [...grouped.keys()];
   events.onFrames?.(ids);
@@ -190,8 +227,21 @@ export async function loadHistory(
 
   for (const id of order) {
     if (cancelled()) break;
+    const weeksHere = grouped.get(id)!;
+    const key = frameKey(user, resolution, id, weeksHere);
+
+    // A year that has already been added up needs neither its weeks nor the
+    // arithmetic again (TE-REQ-19).
+    const hit = await cache.get<TemporalFrame>("frame", key);
+    if (hit) {
+      frames.set(id, hit);
+      loaded++;
+      events.onFrame?.(hit, loaded, order.length);
+      continue;
+    }
+
     const charts = await Promise.all(
-      grouped.get(id)!.map(async (week) => ({
+      weeksHere.map(async (week) => ({
         week,
         artists: await api
           .weeklyArtistChart(user, week)
@@ -201,6 +251,7 @@ export async function loadHistory(
       })),
     );
     const frame = aggregateFrame(id, charts);
+    if (isSettled(frame)) void cache.set("frame", key, frame);
     frames.set(id, frame);
     loaded++;
     events.onFrame?.(frame, loaded, order.length);

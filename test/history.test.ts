@@ -11,12 +11,14 @@ import {
   aggregateFrame,
   frameIdOf,
   frameLabel,
+  frameKey,
   groupWeeks,
+  isSettled,
   loadOrder,
   midpoint,
   type WeekChart,
 } from "../src/lib/history.ts";
-import type { ChartWeek } from "../src/lib/lastfm.ts";
+import { weeksSince, type ChartWeek } from "../src/lib/lastfm.ts";
 
 /** A week, given in whole UTC days, as Last.fm reports them. */
 const week = (fromIso: string, toIso: string): ChartWeek => ({
@@ -124,4 +126,61 @@ test("loading starts at the selected frame and works outwards", () => {
     "2021",
     "2020",
   ]);
+});
+
+/* ─── not asking for weeks that cannot contain anything ──────────────── */
+
+test("weeks before the first scrobble are never requested", () => {
+  const weeks = Array.from({ length: 10 }, (_, i) =>
+    week(
+      new Date(Date.UTC(2020, 0, 5 + i * 7)).toISOString(),
+      new Date(Date.UTC(2020, 0, 12 + i * 7)).toISOString(),
+    ),
+  );
+  const first = Math.floor(Date.UTC(2020, 1, 3) / 1000); // inside week 5
+  const kept = weeksSince(weeks, first);
+  assert.equal(kept.length, 6);
+  // The week the first scrobble falls in is kept, not skipped.
+  assert.ok(kept[0].from < first && kept[0].to >= first);
+});
+
+test("an unknown first scrobble reads the whole history rather than guessing", () => {
+  const weeks = [week("2020-01-05T00:00:00Z", "2020-01-12T00:00:00Z")];
+  assert.deepEqual(weeksSince(weeks, 0), weeks);
+  assert.deepEqual(weeksSince(weeks, NaN), weeks);
+});
+
+/* ─── keeping a finished year whole ──────────────────────────────────── */
+
+test("a year is cached under the exact weeks that produced it", () => {
+  const weeks = [
+    week("2024-01-07T00:00:00Z", "2024-01-14T00:00:00Z"),
+    week("2024-01-14T00:00:00Z", "2024-01-21T00:00:00Z"),
+  ];
+  const key = frameKey("someone", "year", "2024", weeks);
+  assert.equal(frameKey("someone", "year", "2024", weeks), key);
+  // Any change to who, when, or which weeks makes it a different entry.
+  assert.notEqual(frameKey("другой", "year", "2024", weeks), key);
+  assert.notEqual(frameKey("someone", "month", "2024", weeks), key);
+  assert.notEqual(frameKey("someone", "year", "2023", weeks), key);
+  assert.notEqual(frameKey("someone", "year", "2024", weeks.slice(1)), key);
+});
+
+test("only a finished, complete year is kept", () => {
+  const past = week("2024-01-07T00:00:00Z", "2024-01-14T00:00:00Z");
+  const now = Date.parse("2026-01-01T00:00:00Z");
+
+  const whole = aggregateFrame("2024", [chart(past, [["Justice", 5]])]);
+  assert.equal(isSettled(whole, now), true);
+
+  const holed = aggregateFrame("2024", [
+    chart(past, [["Justice", 5]]),
+    { week: past, artists: null },
+  ]);
+  assert.equal(isSettled(holed, now), false, "a year with a hole in it");
+
+  const running = aggregateFrame("2026", [
+    chart(week("2026-01-05T00:00:00Z", "2026-01-12T00:00:00Z"), [["Muse", 3]]),
+  ]);
+  assert.equal(isSettled(running, now), false, "a year still being played");
 });
