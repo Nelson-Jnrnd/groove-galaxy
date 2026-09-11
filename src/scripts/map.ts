@@ -7,6 +7,13 @@
  * this also drives the layout while it settles: bubbles appear as soon as
  * the artist list is known and visibly organise themselves over the next few
  * seconds as similarity arrives.
+ *
+ * It also owns which map is on screen. Three things can change that — the
+ * account, the rolling period (7D…ALL) and entering or leaving the timeline
+ * — and all three are the same operation: work out the view from the URL,
+ * tear down whatever is showing, build the new one. The historical machinery
+ * itself lives in scripts/timeline.ts and lib/{history,temporal}.ts and is
+ * only loaded once somebody asks for it (§51, TE-REQ-20).
  */
 import {
   build,
@@ -14,16 +21,19 @@ import {
   type Artist,
   type BuildMeta,
   type Cluster,
-} from "../lib/build";
-import * as cache from "../lib/cache";
-import { LastFmError, RATE_LIMITED, USER_NOT_FOUND } from "../lib/lastfm";
+} from "../lib/build.ts";
+import * as cache from "../lib/cache.ts";
+import { LastFmError, RATE_LIMITED, USER_NOT_FOUND } from "../lib/lastfm.ts";
 import {
   adjacency,
   ForceLayout,
   mdsSeed,
   spiral,
   type Edge,
-} from "../lib/layout";
+  type Point,
+} from "../lib/layout.ts";
+import { PERIODS, periodInfo, type Period } from "../lib/period.ts";
+import { parseView, sameView, toSearch, type ViewState } from "../lib/viewstate.ts";
 
 /* ─── Constants ──────────────────────────────────────────────────────── */
 
@@ -91,30 +101,47 @@ function sized(url: string, size: string): string {
 
 /* ─── Entry point ────────────────────────────────────────────────────── */
 
+/** The caption's live line: what the map is doing right now. */
+function setCaption(text: string) {
+  const el = document.getElementById("caption-asof");
+  if (el) el.textContent = text;
+}
+
+/**
+ * The one thing assistive technology is told out loud. Deliberately separate
+ * from the caption, which ticks over every fifteen artists while a graph
+ * builds: that is progress worth seeing and not worth hearing three hundred
+ * times (TP-REQ-25 / TE-REQ-32).
+ */
+export function announce(text: string) {
+  const el = document.getElementById("live");
+  if (el) el.textContent = text;
+}
+
 export function start(): void {
   const stage = $<HTMLDivElement>("stage");
   const canvas = $<HTMLCanvasElement>("canvas");
   const veil = $<HTMLDivElement>("veil");
   const veilText = $<HTMLParagraphElement>("veil-text");
   const veilSub = $<HTMLParagraphElement>("veil-sub");
+  const defaultUser = stage.dataset.defaultUser || "NestorDHCP";
 
-  // Whose map. A `?user=` parameter already works, which is most of what a
-  // "show me mine" control will need; the default is the site owner's.
-  const params = new URLSearchParams(location.search);
-  const user =
-    (params.get("user") || "").trim() ||
-    stage.dataset.defaultUser ||
-    "NestorDHCP";
+  /** What the URL asks for… */
+  let wanted = parseView(location.search, defaultUser);
+  /** …and what is actually on screen, which lags it when a load fails. */
+  let showing: ViewState | null = null;
+  let current: MapView | null = null;
+  /** Bumped on every view change; stale callbacks check it and give up. */
+  let generation = 0;
 
   /** REQ-24: never leave a blank canvas behind — say what happened. */
   function quiet(message: string, detail?: string) {
     stage.dataset.state = "empty";
+    delete stage.dataset.busy;
     veil.hidden = false;
     veilText.textContent = message;
-    if (detail) {
-      veilSub.textContent = detail;
-      veilSub.hidden = false;
-    }
+    veilSub.hidden = !detail;
+    if (detail) veilSub.textContent = detail;
     const scope = document.getElementById("caption-scope");
     const aboutScope = document.getElementById("about-scope");
     if (scope) scope.textContent = "Nothing to map right now.";
@@ -124,67 +151,304 @@ export function start(): void {
         "sized by play count and placed next to whichever artists the data " +
         "says they are most alike.";
     }
+    announce(message);
   }
 
-  const accounts = wireAccountSwitcher(user);
-  let map: MapView | null = null;
+  const accounts = wireAccountSwitcher(
+    () => wanted.user,
+    (user) => go({ ...wanted, user, mode: "map", frame: null }),
+  );
 
-  build(user, {
-    onArtists(artists, meta) {
-      map = boot(stage, canvas, veil, artists, meta);
-    },
-    onEdges(edges, done, total) {
-      map?.setEdges(edges, done, total);
-    },
-    onClusters(clusters) {
-      map?.setClusters(clusters);
-    },
-    onEnriched(artist) {
-      map?.refreshArtist(artist.id);
-    },
-    onLabels(clusters) {
-      map?.setClusters(clusters);
-    },
-  })
-    .then(() => {
-      accounts.remember(user);
-      map?.finish();
-      // Housekeeping only once nobody is waiting on the network.
-      void cache.sweep();
+  const periods = wirePeriodControl((period) =>
+    go({ ...wanted, period, mode: "map", frame: null }),
+  );
+
+  const timelineEnter = document.getElementById("timeline-enter");
+  timelineEnter?.addEventListener("click", () => {
+    // §41 — the rolling period is carried along untouched, so leaving the
+    // timeline can put the visitor back where they came from.
+    go({ ...wanted, mode: "timeline", frame: null });
+  });
+
+  /**
+   * Move to another view. Everything that changes what is on screen — a
+   * period button, an account, entering or leaving the timeline, the back
+   * button — arrives here, so there is one place where the URL, the controls
+   * and the canvas are made to agree (TP-REQ-6/10/12).
+   */
+  function go(next: ViewState, replace = false) {
+    if (showing && sameView(next, showing) && next.period === wanted.period) {
+      return;
+    }
+    wanted = next;
+    const url = toSearch(next);
+    if (replace || location.search === url) history.replaceState(null, "", url);
+    else history.pushState(null, "", url);
+    render(next);
+  }
+
+  window.addEventListener("popstate", () => {
+    // TP-REQ-12 — Back and Forward are just another way of asking for a view.
+    const next = parseView(location.search, defaultUser);
+    if (showing && sameView(next, showing)) {
+      wanted = next;
+      syncControls(next);
+      return;
+    }
+    wanted = next;
+    render(next);
+  });
+
+  function syncControls(state: ViewState) {
+    periods.sync(state.period, state.mode === "map");
+    if (timelineEnter) {
+      timelineEnter.setAttribute(
+        "aria-pressed",
+        state.mode === "timeline" ? "true" : "false",
+      );
+    }
+  }
+
+  /** Hand the stage over to a freshly built view, retiring the old one. */
+  function adopt(view: MapView, state: ViewState) {
+    if (current && current !== view) current.destroy();
+    current = view;
+    showing = state;
+    delete stage.dataset.busy;
+    stage.dataset.state = "ready";
+    veil.hidden = true;
+  }
+
+  /**
+   * TP-REQ-19/20 — a period or timeline that refuses to load must not cost
+   * the visitor the map they already had, nor their account.
+   */
+  function failed(message: string, detail: string, state: ViewState) {
+    if (current && showing) {
+      delete stage.dataset.busy;
+      setCaption(message);
+      announce(`${message} Still showing ${describeView(showing)}.`);
+      wanted = showing;
+      syncControls(showing);
+      history.replaceState(null, "", toSearch(showing));
+      return;
+    }
+    quiet(message, detail);
+    accounts.offerRetry(state.user);
+  }
+
+  function describeView(state: ViewState) {
+    return state.mode === "timeline"
+      ? `${state.user}'s timeline`
+      : `${state.user} · ${periodInfo(state.period).label}`;
+  }
+
+  function render(state: ViewState) {
+    const token = ++generation;
+    const stale = () => token !== generation;
+    syncControls(state);
+    document.title = `${state.user}'s listening map · Groove Galaxy`;
+
+    if (current) {
+      // §9 — the working map dims and stays put rather than being replaced by
+      // a blank canvas while the next one is fetched.
+      stage.dataset.busy = "true";
+      setCaption(`Loading ${describeView(state)}…`);
+    } else {
+      veilText.textContent = "Reading the scrobbles…";
+      veilSub.hidden = true;
+      veil.hidden = false;
+      stage.dataset.state = "loading";
+    }
+    announce(`Loading ${describeView(state)}.`);
+
+    if (state.mode === "timeline") {
+      renderTimeline(state, token, stale);
+      return;
+    }
+
+    let built: MapView | null = null;
+    build(state.user, state.period, {
+      onArtists(artists, meta) {
+        if (stale()) return;
+        built = boot(stage, canvas, veil, artists, meta, {
+          playsLabel: (a) =>
+            `${plural(a.plays, "play")} · ${periodInfo(meta.period).suffix}`,
+        });
+        adopt(built, state);
+      },
+      onEdges(edges, done, total) {
+        if (!stale()) built?.setEdges(edges, done, total);
+      },
+      onClusters(clusters) {
+        if (!stale()) built?.setClusters(clusters);
+      },
+      onEnriched(artist) {
+        if (!stale()) built?.refreshArtist(artist.id);
+      },
+      onLabels(clusters) {
+        if (!stale()) built?.setClusters(clusters);
+      },
     })
-    .catch((err: unknown) => {
-      if (map) {
-        // The map is already usable; a late failure is not worth a takeover.
-        map.finish();
-        return;
-      }
-      if (err instanceof EmptyHistoryError) {
-        quiet(
-          "Not enough listening history to draw a map yet.",
-          `${user} needs a few more scrobbles on the pile before there is a shape to show.`,
+      .then(() => {
+        if (stale()) return;
+        accounts.remember(state.user);
+        built?.finish();
+        announce(
+          `${describeView(state)} ready. ${plural(
+            built ? built.count : 0,
+            "artist",
+          )}.`,
         );
-      } else if (err instanceof LastFmError && err.code === USER_NOT_FOUND) {
-        quiet(
-          "No Last.fm account by that name.",
-          `Last.fm doesn't know a user called "${user}".`,
-        );
-      } else if (err instanceof LastFmError && err.code === RATE_LIMITED) {
-        // The key is shared and read-only, so a busy spell is somebody
-        // else's map rather than anything this visitor did.
-        quiet(
-          "Last.fm is asking us to slow down.",
-          "Too many maps have been built in a short space of time. Waiting a minute and refreshing usually clears it.",
-        );
-      } else {
-        quiet(
-          "Couldn't reach Last.fm just now.",
-          "The map is built from live Last.fm data, and the request didn't come back. Refreshing may help.",
-        );
-      }
-      // Every failure gets a way forward — a dead end is never the right
-      // answer when picking a different account might just work.
-      accounts.offerRetry(user);
+        // Housekeeping only once nobody is waiting on the network.
+        void cache.sweep();
+      })
+      .catch((err: unknown) => {
+        if (stale()) return;
+        if (built) {
+          // This map is already usable; a late failure is not a takeover.
+          built.finish();
+          return;
+        }
+        report(err, state);
+      });
+  }
+
+  /** The historical machinery, fetched only when somebody asks for it. */
+  function renderTimeline(
+    state: ViewState,
+    token: number,
+    stale: () => boolean,
+  ) {
+    void import("./timeline.ts")
+      .then(({ startTimeline }) =>
+        startTimeline({
+          stage,
+          canvas,
+          veil,
+          state,
+          stale,
+          boot: (artists, meta, options) =>
+            boot(stage, canvas, veil, artists, meta, options),
+          adopt: (view, frame) => {
+            if (stale()) return;
+            const shown = { ...state, frame };
+            adopt(view, shown);
+            wanted = shown;
+            history.replaceState(null, "", toSearch(shown));
+            accounts.remember(state.user);
+          },
+          /**
+           * TE-REQ-26 — the year is in the URL so it can be shared, but it
+           * *replaces* rather than pushes: playing through eight years must
+           * not leave eight entries for the back button to walk out of.
+           */
+          onFrame: (frame) => {
+            if (stale()) return;
+            const next = { ...wanted, frame };
+            wanted = next;
+            showing = next;
+            history.replaceState(null, "", toSearch(next));
+          },
+          onExit: () => {
+            if (token !== generation) return;
+            // §41 — back to the rolling period the visitor arrived with.
+            go({ ...wanted, mode: "map", frame: null });
+          },
+          onError: (err) => {
+            if (!stale()) report(err, state);
+          },
+        }),
+      )
+      .catch((err: unknown) => {
+        if (!stale()) report(err, state);
+      });
+  }
+
+  function report(err: unknown, state: ViewState) {
+    if (err instanceof EmptyHistoryError) {
+      failed(
+        "Not enough listening history to draw a map yet.",
+        `${state.user} needs a few more scrobbles on the pile before there is a shape to show${
+          state.period === "overall"
+            ? ""
+            : ` in ${periodInfo(state.period).phrase}`
+        }.`,
+        state,
+      );
+    } else if (err instanceof LastFmError && err.code === USER_NOT_FOUND) {
+      failed(
+        "No Last.fm account by that name.",
+        `Last.fm doesn't know a user called "${state.user}".`,
+        state,
+      );
+    } else if (err instanceof LastFmError && err.code === RATE_LIMITED) {
+      // The key is shared and read-only, so a busy spell is somebody else's
+      // map rather than anything this visitor did.
+      failed(
+        "Last.fm is asking us to slow down.",
+        "Too many maps have been built in a short space of time. Waiting a minute and refreshing usually clears it.",
+        state,
+      );
+    } else {
+      failed(
+        "Couldn't reach Last.fm just now.",
+        "The map is built from live Last.fm data, and the request didn't come back. Refreshing may help.",
+        state,
+      );
+    }
+  }
+
+  // The URL is the source of truth from the very first frame, so a shared
+  // link opens the account, the period and the year it names.
+  history.replaceState(null, "", toSearch(wanted));
+  render(wanted);
+}
+
+/* ─── the rolling-period control (TP-REQ-3/4/22/23) ──────────────────── */
+
+/**
+ * Six buttons, always visible, one of them pressed. Arrow keys move along
+ * the row the way a segmented control should; the buttons themselves are
+ * ordinary buttons, so they are keyboard-operable without any of that.
+ *
+ * Nothing here rebuilds the row when the map changes, which is what keeps a
+ * keyboard user's focus where they left it while the new map loads
+ * (TP-REQ-24).
+ */
+function wirePeriodControl(choose: (period: Period) => void) {
+  const wrap = document.getElementById("periods");
+  const buttons = new Map<Period, HTMLButtonElement>();
+  if (wrap) {
+    for (const info of PERIODS) {
+      const btn = wrap.querySelector<HTMLButtonElement>(
+        `[data-period="${info.value}"]`,
+      );
+      if (!btn) continue;
+      buttons.set(info.value, btn);
+      btn.addEventListener("click", () => choose(info.value));
+    }
+    wrap.addEventListener("keydown", (e) => {
+      if (e.key !== "ArrowRight" && e.key !== "ArrowLeft") return;
+      const order = [...buttons.values()];
+      const at = order.indexOf(document.activeElement as HTMLButtonElement);
+      if (at === -1) return;
+      e.preventDefault();
+      const next =
+        order[(at + (e.key === "ArrowRight" ? 1 : order.length - 1)) % order.length];
+      next.focus();
     });
+  }
+
+  return {
+    sync(period: Period, isMap: boolean) {
+      for (const [value, btn] of buttons) {
+        const on = isMap && value === period;
+        btn.setAttribute("aria-pressed", on ? "true" : "false");
+        btn.classList.toggle("is-on", on);
+      }
+    },
+  };
 }
 
 /* ─── Choosing whose map to draw ─────────────────────────────────────── */
@@ -212,11 +476,16 @@ function readRecents(): string[] {
  * that most needs it is the one where the build failed: a mistyped username
  * must offer a way to fix itself rather than being a dead end.
  *
- * Switching navigates rather than rebuilding in place — the URL is then the
- * thing that identifies a map, so it can be shared, bookmarked and reached
- * with the back button.
+ * Switching hands the account to the controller rather than reloading the
+ * page: the URL still identifies the map — so it can be shared, bookmarked
+ * and reached with the back button — but the browser keeps the caches it has
+ * already warmed, and TP-REQ-5's "don't make me type my name again" holds
+ * for every other control on the page too.
  */
-function wireAccountSwitcher(current: string) {
+function wireAccountSwitcher(
+  current: () => string,
+  navigate: (user: string) => void,
+) {
   const dialog = $<HTMLDialogElement>("account");
   const form = $<HTMLFormElement>("account-form");
   const input = $<HTMLInputElement>("account-input");
@@ -237,7 +506,7 @@ function wireAccountSwitcher(current: string) {
 
   function renderRecents() {
     const others = readRecents().filter(
-      (name) => name.toLowerCase() !== current.toLowerCase(),
+      (name) => name.toLowerCase() !== current().toLowerCase(),
     );
     recentList.replaceChildren();
     if (!others.length) {
@@ -262,13 +531,12 @@ function wireAccountSwitcher(current: string) {
   function go(name: string) {
     const clean = name.trim();
     if (!clean) return;
-    const url = new URL(location.href);
-    url.searchParams.set("user", clean);
-    location.assign(url.toString());
+    if (dialog.open) dialog.close();
+    navigate(clean);
   }
 
   $<HTMLButtonElement>("account-open").addEventListener("click", () =>
-    show(current),
+    show(current()),
   );
   $<HTMLButtonElement>("account-cancel").addEventListener("click", () =>
     dialog.close(),
@@ -314,12 +582,72 @@ function wireAccountSwitcher(current: string) {
 /* ─── The map proper ─────────────────────────────────────────────────── */
 
 /** What `start()` keeps hold of so it can feed the map as data arrives. */
-interface MapView {
+export interface MapView {
   setEdges(edges: Edge[], done: number, total: number): void;
   setClusters(clusters: Cluster[]): void;
   refreshArtist(id: number): void;
   finish(): void;
+  /** How many bubbles this map holds. */
+  readonly count: number;
+  /** Every listener, observer and pending image this map owns, released. */
+  destroy(): void;
+
+  /* ── the hooks the timeline drives the same renderer through ────────
+     A temporal frame changes radii and opacity and nothing else, so it
+     needs to write those and ask for a repaint — not to own a renderer of
+     its own (§50: the renderer is handed a state, it does not reconstruct
+     history).                                                            */
+
+  /** Repaint now, after the caller has written radii/alpha onto artists. */
+  redraw(): void;
+  /** Radii changed enough that the framing should be recomputed. */
+  remeasure(): void;
+  /**
+   * Re-frame on the whole map — but only while the visitor has not taken the
+   * view over. Once they have panned or zoomed, the view is theirs.
+   */
+  refit(): void;
+  /** Called once the reference layout has finished settling. */
+  onSettled(fn: () => void): void;
+  /** A copy of the settled reference coordinates (§20). */
+  basePositions(): Point[];
+  /** Freeze the force simulation — the timeline owns positions from here. */
+  stopLayout(): void;
+  /** Re-render the open detail panel, e.g. after moving to another year. */
+  refreshDetail(): void;
+  /** The sentence under the map. */
+  setCaptionScope(text: string): void;
+  /** The live line beside it. */
+  setStatus(text: string): void;
+  /** Whichever artist the panel is open on, if any. */
+  readonly selection: Artist | null;
 }
+
+export interface BootOptions {
+  /** How a play count is worded — the active period or year decides it. */
+  playsLabel?: (a: Artist) => string;
+  /** Extra detail-panel content for the artist, inserted after the title. */
+  detailExtra?: (a: Artist) => Node | null;
+  /**
+   * How the panel ranks this artist, or null for no ranking at all. The
+   * timeline passes null: its own block already gives the rank *within the
+   * shown year*, and a second ranking by range total would contradict it.
+   */
+  rankLine?: (a: Artist) => string | null;
+  /** Somebody opened or closed an artist (TE-REQ-16 pauses playback on it). */
+  onSelect?: (a: Artist | null) => void;
+  /** Timeline mode: the caller supplies coordinates, not the force layout. */
+  externalPositions?: boolean;
+}
+
+/**
+ * Which map currently owns the page's shared furniture — the legend, the
+ * detail panel, the keyboard route, the search box. A map being retired
+ * tidies those away only if a successor has not already claimed them, which
+ * is the normal case when one period replaces another: the new map is built
+ * and adopted first, and only then is the old one destroyed.
+ */
+let owner = 0;
 
 function boot(
   stage: HTMLDivElement,
@@ -327,9 +655,33 @@ function boot(
   veil: HTMLDivElement,
   artists: Artist[],
   meta: BuildMeta,
+  options: BootOptions = {},
 ): MapView {
+  const mine = ++owner;
+  /** Everything this map subscribes to, dropped in one go by `destroy()`. */
+  const life = new AbortController();
+  const signal = life.signal;
+  let dead = false;
+  const playsLabel =
+    options.playsLabel || ((a: Artist) => plural(a.plays, "play"));
+  const rankLine =
+    options.rankLine === undefined ? defaultRankLine : options.rankLine;
   const ctx = canvas.getContext("2d", { alpha: false })!;
   const byId = new Map(artists.map((a) => [a.id, a]));
+
+  // Whatever the last map left on the page belongs to the last map: an open
+  // panel describing an artist in 2023 has no business surviving into the
+  // 12-month map that replaced it.
+  {
+    const panel = $<HTMLElement>("detail");
+    panel.hidden = true;
+    panel.replaceChildren();
+    const hoverTip = $<HTMLDivElement>("tip");
+    hoverTip.hidden = true;
+    const legendItems = $<HTMLUListElement>("legend-list");
+    legendItems.replaceChildren();
+    $<HTMLDivElement>("legend").hidden = true;
+  }
   let clusters: Cluster[] = [];
   const colorOf = (a: Artist) =>
     a.cluster >= 0 && clusters[a.cluster]
@@ -491,6 +843,7 @@ function boot(
   }
 
   function pumpImages() {
+    if (dead) return;
     if (queueOrderStale && queue.length > 1) {
       // Nearest to the middle of the current view first, and within that
       // the bigger bubbles — which is the order a visitor notices them in.
@@ -587,7 +940,7 @@ function boot(
       ctx.lineWidth = 1;
       for (const s of highlight.similar) {
         const other = byId.get(s.id);
-        if (!other) continue;
+        if (!other || other.r <= 0 || (other.alpha ?? 1) <= 0.12) continue;
         ctx.strokeStyle = `rgba(236, 233, 225, ${0.1 + s.score * 0.32})`;
         ctx.beginPath();
         ctx.moveTo(toScreenX(highlight.x), toScreenY(highlight.y));
@@ -599,6 +952,10 @@ function boot(
     const labels: { a: Artist; sx: number; sy: number; r: number }[] = [];
 
     for (const a of artists) {
+      // A temporal frame the artist wasn't played in leaves them at zero
+      // radius: nothing to draw, and nothing to trip over (TE-REQ-10).
+      const own = a.alpha ?? 1;
+      if (a.r <= 0 || own <= 0.01) continue;
       const r = a.r * view.scale;
       const sx = toScreenX(a.x);
       const sy = toScreenY(a.y);
@@ -607,9 +964,9 @@ function boot(
 
       const isMatch = !matches || matches.has(a.id);
       const isLinked = !highlight || linked.has(a.id);
-      let alpha = 1;
-      if (!isMatch) alpha = 0.14;
-      else if (!isLinked) alpha = 0.5;
+      let alpha = own;
+      if (!isMatch) alpha *= 0.14;
+      else if (!isLinked) alpha *= 0.5;
 
       const color = colorOf(a);
       ctx.globalAlpha = alpha;
@@ -657,11 +1014,13 @@ function boot(
       }
     }
 
-    ctx.globalAlpha = 1;
     ctx.textAlign = "center";
     ctx.textBaseline = "top";
     for (const { a, sx, sy, r } of labels) {
       const emphasised = a === selected || a === hovered || a === focused;
+      // A fading artist's name fades with it rather than hanging over an
+      // empty patch of map.
+      ctx.globalAlpha = clamp((a.alpha ?? 1) * 1.4, 0, 1);
       ctx.font = `${emphasised ? 500 : 400} ${clamp(r * 0.34, 11, 15).toFixed(1)}px "IBM Plex Sans", system-ui, sans-serif`;
       ctx.lineWidth = 3;
       ctx.strokeStyle = "rgba(20, 20, 19, 0.85)";
@@ -669,6 +1028,7 @@ function boot(
       ctx.fillStyle = emphasised ? "#ece9e1" : "rgba(236, 233, 225, 0.72)";
       ctx.fillText(a.name, sx, sy + r + 5);
     }
+    ctx.globalAlpha = 1;
   }
 
   /* ── hit testing ────────────────────────────────────────────────── */
@@ -679,6 +1039,7 @@ function boot(
     let best: Artist | null = null;
     let bestDepth = Infinity;
     for (const a of artists) {
+      if (a.r <= 0 || (a.alpha ?? 1) <= 0.12) continue; // §26: gone means gone
       const dx = wx - a.x;
       const dy = wy - a.y;
       // Keep small bubbles tappable even when zoomed out (REQ-21).
@@ -731,7 +1092,7 @@ function boot(
   function flyToArtist(a: Artist) {
     // Close enough to read the neighbourhood, never so close it loses context.
     const target = clamp(
-      Math.min(width, height) / (a.r * 9),
+      Math.min(width, height) / (Math.max(a.r, 8) * 9),
       fitScale * 1.1,
       fitScale * 5,
     );
@@ -780,7 +1141,7 @@ function boot(
       pinchDistance = Math.hypot(a.x - b.x, a.y - b.y);
       panning = false;
     }
-  });
+  }, { signal });
 
   canvas.addEventListener("pointermove", (e) => {
     const p = localPoint(e);
@@ -810,7 +1171,7 @@ function boot(
     }
 
     if (e.pointerType === "mouse") setHover(hit(p.x, p.y), e.clientX, e.clientY);
-  });
+  }, { signal });
 
   function endPointer(e: PointerEvent) {
     const wasPanning = panning;
@@ -832,11 +1193,11 @@ function boot(
     }
   }
 
-  canvas.addEventListener("pointerup", endPointer);
-  canvas.addEventListener("pointercancel", endPointer);
+  canvas.addEventListener("pointerup", endPointer, { signal });
+  canvas.addEventListener("pointercancel", endPointer, { signal });
   canvas.addEventListener("pointerleave", () => {
     if (!panning) setHover(null);
-  });
+  }, { signal });
 
   canvas.addEventListener(
     "wheel",
@@ -847,7 +1208,7 @@ function boot(
       const step = Math.exp(-clamp(e.deltaY, -60, 60) * 0.0032);
       zoomAbout(e.clientX - rect.left, e.clientY - rect.top, step);
     },
-    { passive: false },
+    { passive: false, signal },
   );
 
   /* ── hover tooltip (REQ-20) ─────────────────────────────────────── */
@@ -865,7 +1226,7 @@ function boot(
       return;
     }
     tip.hidden = false;
-    tip.textContent = `${a.name} · ${plural(a.plays, "play")}`;
+    tip.textContent = `${a.name} · ${playsLabel(a)}`;
     const rect = stage.getBoundingClientRect();
     const x = clamp(clientX - rect.left + 14, 8, rect.width - tip.offsetWidth - 8);
     const y = clamp(clientY - rect.top + 16, 8, rect.height - tip.offsetHeight - 8);
@@ -885,6 +1246,8 @@ function boot(
       return;
     }
     selected = a;
+    // TE-REQ-16 — reading an artist stops the timeline advancing under you.
+    options.onSelect?.(a);
     if (fly) flyToArtist(a);
     renderDetail(a);
     syncA11y();
@@ -898,6 +1261,7 @@ function boot(
   function deselect() {
     if (!selected) return;
     selected = null;
+    options.onSelect?.(null);
     detail.hidden = true;
     detail.replaceChildren();
     syncA11y();
@@ -962,15 +1326,23 @@ function boot(
 
     const title = el("h2", "detail__title", a.name);
 
+    // §11 — a windowed play count says which window it is a count of, so
+    // "47 plays" can never be mistaken for a lifetime total.
+    const label = playsLabel(a);
+    const [head, ...rest] = label.split(" · ");
+    const rank = rankLine(a);
     const plays = el("p", "detail__plays");
     plays.append(
-      el("strong", undefined, a.plays.toLocaleString("en-US")),
+      el("strong", undefined, head),
       document.createTextNode(
-        ` ${a.plays === 1 ? "play" : "plays"} — ${rankLine(a)}`,
+        `${rest.length ? ` · ${rest.join(" · ")}` : ""}${rank ? ` — ${rank}` : ""}`,
       ),
     );
 
     body.append(kicker, title, plays);
+
+    const extra = options.detailExtra?.(a);
+    if (extra) body.append(extra);
 
     if (a.tags.length) {
       const tags = el("ul", "detail__tags");
@@ -1047,7 +1419,7 @@ function boot(
     detail.scrollTop = 0;
   }
 
-  function rankLine(a: Artist) {
+  function defaultRankLine(a: Artist) {
     const rank = artists.filter((o) => o.plays > a.plays).length + 1;
     return `#${rank} most played of the ${artists.length} artists here`;
   }
@@ -1058,6 +1430,8 @@ function boot(
   const a11yButtons = new Map<number, HTMLButtonElement>();
 
   {
+    // A previous map's list is gone; this one owns the route now.
+    a11yList.replaceChildren();
     const frag = document.createDocumentFragment();
     // Heaviest first, so tabbing starts somewhere meaningful.
     for (const a of [...artists].sort((x, y) => y.plays - x.plays)) {
@@ -1065,7 +1439,7 @@ function boot(
       const btn = document.createElement("button");
       btn.type = "button";
       btn.setAttribute("aria-pressed", "false");
-      btn.textContent = `${a.name}, ${plural(a.plays, "play")}${groupPhrase(a)}`;
+      btn.textContent = `${a.name}, ${playsLabel(a)}${groupPhrase(a)}`;
       btn.addEventListener("focus", () => {
         focused = a;
         flyToArtist(a);
@@ -1105,12 +1479,20 @@ function boot(
       : `, in the ${label} group`;
   }
 
-  /** Group names only exist once clustering has run; refresh them then. */
+  /**
+   * Group names only exist once clustering has run, and in the timeline both
+   * the play counts and who is even here change with the year — so the
+   * keyboard route is rewritten rather than written once. An artist the
+   * account wasn't playing in the selected year leaves the route entirely
+   * (TE-REQ-34) rather than sitting in it as a silent zero.
+   */
   function rebuildA11yLabels() {
     for (const [id, btn] of a11yButtons) {
       const a = byId.get(id);
       if (!a) continue;
-      btn.textContent = `${a.name}, ${plural(a.plays, "play")}${groupPhrase(a)}`;
+      btn.textContent = `${a.name}, ${playsLabel(a)}${groupPhrase(a)}`;
+      const item = btn.parentElement;
+      if (item) item.hidden = a.r <= 0;
     }
   }
 
@@ -1173,7 +1555,7 @@ function boot(
         dot.style.background = colorOf(a);
         dot.setAttribute("aria-hidden", "true");
         li.append(dot, el("span", "finder__name", a.name));
-        li.append(el("span", "finder__plays", plural(a.plays, "play")));
+        li.append(el("span", "finder__plays", playsLabel(a)));
         li.addEventListener("mousedown", (ev) => {
           ev.preventDefault();
           pick(a);
@@ -1205,11 +1587,11 @@ function boot(
     select(a, { fly: true });
   }
 
-  search.addEventListener("input", runSearch);
+  search.addEventListener("input", runSearch, { signal });
   search.addEventListener("focus", () => {
     if (search.value.trim()) runSearch();
-  });
-  search.addEventListener("blur", () => window.setTimeout(closeResults, 120));
+  }, { signal });
+  search.addEventListener("blur", () => window.setTimeout(closeResults, 120), { signal });
   search.addEventListener("keydown", (e) => {
     if (e.key === "ArrowDown") {
       e.preventDefault();
@@ -1227,22 +1609,26 @@ function boot(
       closeResults();
       draw();
     }
-  });
+  }, { signal });
 
   /* ── zoom / reset controls (REQ-17, REQ-18) ─────────────────────── */
 
-  $<HTMLButtonElement>("zoom-in").addEventListener("click", () =>
-    zoomAbout(width / 2, height / 2, 1.45),
+  $<HTMLButtonElement>("zoom-in").addEventListener(
+    "click",
+    () => zoomAbout(width / 2, height / 2, 1.45),
+    { signal },
   );
-  $<HTMLButtonElement>("zoom-out").addEventListener("click", () =>
-    zoomAbout(width / 2, height / 2, 1 / 1.45),
+  $<HTMLButtonElement>("zoom-out").addEventListener(
+    "click",
+    () => zoomAbout(width / 2, height / 2, 1 / 1.45),
+    { signal },
   );
   $<HTMLButtonElement>("reset").addEventListener("click", () => {
     matches = null;
     search.value = "";
     closeResults();
     resetView();
-  });
+  }, { signal });
 
   window.addEventListener("keydown", (e) => {
     const inField =
@@ -1261,7 +1647,7 @@ function boot(
       e.preventDefault();
       search.focus();
     }
-  });
+  }, { signal });
 
   /* ── legend (OQ-4/OQ-8) ─────────────────────────────────────────── */
 
@@ -1316,7 +1702,7 @@ function boot(
       const open = legendToggle.getAttribute("aria-expanded") === "true";
       legendToggle.setAttribute("aria-expanded", open ? "false" : "true");
       legendBody.hidden = open;
-    });
+    }, { signal });
   }
 
   /* ── caption + method note (REQ-3) ──────────────────────────────── */
@@ -1340,10 +1726,10 @@ function boot(
   document.title = `${meta.user}'s listening map · Groove Galaxy`;
 
   /** The live status line: what the map is still waiting for. */
-  function setState(text: string) {
+  function setStatus(text: string) {
     captionState.textContent = text;
   }
-  setState(`Reading ${meta.user}'s listening history…`);
+  setStatus(`Reading ${meta.user}'s listening history…`);
 
   const aboutToggle = $<HTMLButtonElement>("about-toggle");
   const about = $<HTMLElement>("about");
@@ -1352,7 +1738,7 @@ function boot(
     aboutToggle.setAttribute("aria-expanded", open ? "false" : "true");
     about.hidden = open;
     if (!open) about.scrollIntoView({ behavior: "smooth", block: "nearest" });
-  });
+  }, { signal });
 
   /* ── settling ────────────────────────────────────────────────────
      While the layout is still moving the map re-frames itself, so the
@@ -1361,15 +1747,18 @@ function boot(
 
   let following = true;
   let settling = false;
+  /** Set once the timeline takes over positions; the simulation stops. */
+  let frozen = false;
+  const settledCallbacks: (() => void)[] = [];
 
   function stopFollowing() {
     following = false;
   }
-  canvas.addEventListener("pointerdown", stopFollowing);
-  canvas.addEventListener("wheel", stopFollowing, { passive: true });
+  canvas.addEventListener("pointerdown", stopFollowing, { signal });
+  canvas.addEventListener("wheel", stopFollowing, { passive: true, signal });
 
   function settleFrame() {
-    if (!settling) return;
+    if (!settling || dead) return;
     layout.step(LAYOUT_BUDGET_MS);
     layout.centre();
     syncPositions();
@@ -1384,13 +1773,16 @@ function boot(
     if (layout.settled) {
       settling = false;
       reprioritise();
+      // §20 — the reference layout is now the timeline's fixed geography.
+      const waiting = settledCallbacks.splice(0);
+      for (const fn of waiting) fn();
     } else {
       requestAnimationFrame(settleFrame);
     }
   }
 
   function nudge() {
-    if (settling) return;
+    if (settling || frozen || dead) return;
     settling = true;
     requestAnimationFrame(settleFrame);
   }
@@ -1408,7 +1800,7 @@ function boot(
       }
       layout.setEdges(edges);
       nudge();
-      setState(
+      setStatus(
         done < total
           ? `Placing artists — ${done} of ${total}`
           : "Settling…",
@@ -1432,11 +1824,92 @@ function boot(
 
     finish() {
       const cached = cache.summary();
-      setState(
+      setStatus(
         `Live from Last.fm · ${artists.length} artists` +
           (cached ? ` · ${cached}` : ""),
       );
       nudge();
+    },
+
+    get count() {
+      return artists.length;
+    },
+
+    get selection() {
+      return selected;
+    },
+
+    redraw: draw,
+
+    remeasure() {
+      measure();
+      computeHome();
+      draw();
+    },
+
+    refit() {
+      if (!following) return;
+      view.cx = home.cx;
+      view.cy = home.cy;
+      view.scale = home.scale;
+      draw();
+      reprioritise();
+    },
+
+    onSettled(fn) {
+      if (layout.settled && !settling) fn();
+      else settledCallbacks.push(fn);
+    },
+
+    basePositions() {
+      return layout.pos.map((p) => ({ x: p.x, y: p.y }));
+    },
+
+    stopLayout() {
+      frozen = true;
+      settling = false;
+    },
+
+    refreshDetail() {
+      if (selected) renderDetail(selected);
+      rebuildA11yLabels();
+    },
+
+    setCaptionScope(text) {
+      captionScope.textContent = text;
+      $<HTMLElement>("about-scope").textContent = text;
+    },
+
+    setStatus,
+
+    /**
+     * Everything this map holds on to, released — so switching period or
+     * entering the timeline replaces the map rather than layering a second
+     * one on top of the same buttons.
+     */
+    destroy() {
+      dead = true;
+      frozen = true;
+      settling = false;
+      life.abort();
+      observer.disconnect();
+      stopAnimation();
+      if (rafId) cancelAnimationFrame(rafId);
+      rafId = 0;
+      queue = [];
+      queued.clear();
+      images.clear();
+      a11yButtons.clear();
+      matches = null;
+      if (owner !== mine) return; // a successor already owns the page
+      a11yList.replaceChildren();
+      detail.hidden = true;
+      detail.replaceChildren();
+      legend.hidden = true;
+      legendList.replaceChildren();
+      tip.hidden = true;
+      search.value = "";
+      closeResults();
     },
   };
   let seeded = false;
@@ -1445,8 +1918,10 @@ function boot(
 
   const observer = new ResizeObserver(resize);
   observer.observe(stage);
-  window.addEventListener("orientationchange", () =>
-    window.setTimeout(resize, 200),
+  window.addEventListener(
+    "orientationchange",
+    () => window.setTimeout(resize, 200),
+    { signal },
   );
 
   resize();

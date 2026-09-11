@@ -15,7 +15,17 @@ It answers a different question than the `/music` page on
 [nelson-j.ch](https://nelson-j.ch): that one says *what is playing right
 now*, this one says *what does the whole shape of my listening look like*.
 
-The product requirements live in [`SPEC.md`](./SPEC.md). This README covers
+Two controls decide *which* listening it draws:
+
+- a **period selector** (`7D · 1M · 3M · 6M · 1Y · ALL`) rebuilds the map
+  from any of Last.fm's rolling windows, so "what have I actually been
+  playing this month" is one click from "what have I ever played";
+- **Explore over time** leaves the rolling windows behind and reconstructs
+  the account's calendar years from Last.fm's weekly charts, so the same
+  galaxy can be watched filling, emptying and refilling year by year.
+
+The product requirements live in [`SPEC.md`](./SPEC.md), and the temporal
+ones in [`docs/temporal-spec.md`](./docs/temporal-spec.md). This README covers
 what was actually built and, in §"Decisions", what each of the spec's open
 questions was resolved to.
 
@@ -39,13 +49,26 @@ src/
 │   ├── lastfm.ts          # browser Last.fm client: pooled, backing off, cached
 │   ├── cache.ts           # IndexedDB store, one lifetime per kind of entry
 │   ├── layout.ts          # MDS seed, force simulation (steppable), clustering
+│   ├── period.ts          # the rolling windows: labels, play floors, captions
+│   ├── viewstate.ts       # what the URL means (account · period · year)
+│   ├── history.ts         # weekly charts → calendar frames
+│   ├── temporal.ts        # temporal universe, per-year state, derived facts
 │   └── build.ts           # orchestrates a live build, emitting as it goes
 ├── layouts/BaseLayout.astro
 ├── components/SiteHeader.astro
 ├── pages/index.astro      # the page: canvas, controls, panels, method note
-├── scripts/map.ts         # rendering, interaction, driving the settling layout
+├── scripts/
+│   ├── map.ts             # rendering, interaction, and which view is on screen
+│   └── timeline.ts        # the temporal controller (loaded only on demand)
 └── styles/global.css
+
+test/                      # node --test, no browser: the arithmetic and the URLs
 ```
+
+The split is the point: data retrieval (`lastfm`, `history`) → temporal model
+(`temporal`) → graph and layout (`build`, `layout`) → rendering and UI
+(`scripts/`). Nothing under `lib/` touches a canvas, which is what lets the
+year-by-year arithmetic be tested without one.
 
 ## Run locally
 
@@ -55,7 +78,7 @@ npm run dev              # http://localhost:4321/groove-galaxy
 npm run build            # static output to ./dist
 npm run preview
 npm run check            # astro type/diagnostics check
-
+npm test                 # node --test (Node 22+, no browser needed)
 ```
 
 ## Whose map
@@ -94,6 +117,70 @@ Ordered so that the map exists long before it is finished:
 Measured on a 300-artist account: **first bubbles at ~1s, complete at ~5s**,
 and **~0.6s with nothing fetched at all** on a second visit.
 
+## Periods, and years
+
+Two different questions, deliberately kept apart (§33 of the temporal spec):
+*what am I listening to now* is a rolling window, *how did this become what
+it is* is a calendar. "12 months" and "2025" are not two options of the same
+kind, so they do not sit in one selector.
+
+### The rolling period
+
+`?period=` takes one of Last.fm's own windows — `7day`, `1month`, `3month`,
+`6month`, `12month`, `overall` — and anything missing or unrecognised means
+`overall`, which is what every URL written before this feature existed says.
+Changing it rebuilds the map in place: the URL updates, Back and Forward
+work, and the account is never re-typed.
+
+Bubble size is always plays **inside the chosen window**. The play floor
+moves with it (2 plays over a week, 3 over a month, … 25 over a lifetime),
+because a 25-play bar that is sensible across fifteen years empties a
+seven-day map completely.
+
+What does *not* change is similarity: whether Daft Punk is close to Justice
+has nothing to do with which weeks you are looking at, so the similarity,
+tag and artwork caches are shared across every period and every account. A
+period switch usually only has to fetch the artists it has not seen before.
+
+### The timeline
+
+`user.getTopArtists` cannot answer "2019". `user.getWeeklyChartList` and
+`user.getWeeklyArtistChart` can, one week at a time, so a year is
+reconstructed by adding its weeks up.
+
+Weeks straddle New Year, and a weekly total cannot honestly be split across
+the days inside it — so **each week is attributed whole, to the year
+containing its midpoint**. A chart covering 29 Dec → 5 Jan counts as the new
+year. It is deterministic, it gives away as often as it takes, and the method
+note says so on the page.
+
+Then one thing is built and never rebuilt:
+
+- **one artist universe** — every year's top 50, unioned, topped up by total
+  plays, capped at 300. A one-year obsession gets in on the strength of that
+  year; a decade of steady background listening gets in on volume.
+- **one similarity graph, one clustering, one layout.** Positions and group
+  colours are computed once for the whole timeline and then held still.
+
+A year then changes exactly two numbers per artist: radius and opacity. An
+artist who stops being played shrinks and fades; when they come back, they
+come back to the same place, which is the whole reason the map is worth
+having a memory of. Bubbles that would overlap at their new sizes get a
+bounded nudge — never more than ~24 units from where the reference layout put
+them — rather than a fresh force simulation, because "the electronic corner
+grew" is a fact about listening and "everything moved" is not.
+
+Nothing historical is fetched until somebody presses **Explore over time**: a
+decade is roughly five hundred requests, and no ordinary map load has any
+business spending that. Completed weeks are immutable, so they are cached for
+years; the week in progress gets half an hour. The second visit costs
+nothing.
+
+Frames are trimmed to the span the account actually listened in — Last.fm
+hands back a chart for every week since registration, including the years
+before anything was played. Quiet years *inside* that span stay, because a
+quiet year is a real thing to see.
+
 ## The cache
 
 The observation it is built on: **similarity is not personal.** That Daft
@@ -103,7 +190,9 @@ and artwork are the same. Only play counts belong to one person, and those
 are the one thing that must stay current.
 
 So `src/lib/cache.ts` files entries by kind, each with its own lifetime —
-similarity, tags and art for 30 days, top artists for 6 hours — in IndexedDB
+similarity, tags and art for 30 days, top artists for 6 hours, the weekly
+chart list for a day, a finished weekly chart for ten years and the week in
+progress for half an hour — in IndexedDB
 (localStorage is synchronous, so it would stutter the layout, and it caps out
 around 5 MB). Entries are evicted least-recently-used past a ceiling, and
 every failure path — private browsing, disabled storage, eviction — lands on
@@ -209,6 +298,17 @@ order, since searching by name is the faster route through three hundred
 artists. Colour is never the only carrier of meaning — every group's name is
 written out in the legend and in each artist's panel.
 
+The period buttons and the timeline controls are ordinary buttons with a real
+pressed state; arrow keys move along the period row the way a segmented
+control should, and rebuilding the map never takes focus away from the button
+that asked for it. One polite live region carries the coarse news — "3 months
+ready. 39 artists.", "2024 selected. 27 active artists." — while the caption
+strip carries the per-artist progress silently: a map settling three hundred
+bubbles, or a timeline playing through eight years, must not become three
+hundred announcements. In the timeline, only artists actually played in the
+selected year are offered in the keyboard list; the rest are gone from it, as
+they are from the canvas.
+
 ## Known risk: the shared API key
 
 Going live took the key from a dozen calls per visitor to roughly 900 — one
@@ -222,6 +322,10 @@ One visitor building one map is nowhere near that. But if this page ever gets
 real traffic, the levers in order of how much they buy and how little they
 cost are:
 
+(The timeline adds a different kind of spending: one request per week of the
+account's life, roughly 500 for a decade, paid once and then cached for
+years. It only ever happens when a visitor explicitly asks for it.)
+
 1. **Cut the background 600.** Tags and artwork are two-thirds of the volume
    and pure enrichment. Tags only name the groups, so sampling the dozen
    heaviest artists per group would give the same labels for a fraction of
@@ -231,6 +335,10 @@ cost are:
 3. **Get a key of its own**, rather than sharing with `/music`.
 
 ## Still to do
+
+- **Monthly resolution.** The data model already carries frame ids of the
+  shape `2024-08`, the URL parser already accepts `?month=`, and
+  `history.ts` aggregates at either resolution — only the UI is missing.
 
 - **Add the link on the personal site.** `/music` needs a link out to this
   map (REQ-27). It lives in a different repository

@@ -32,6 +32,19 @@ export const TTL = {
   art: 30 * 24 * 3600e3,
   /** Play counts are the whole point of the map being current. */
   top: 6 * 3600e3,
+  /**
+   * Which weeks Last.fm has charts for. It grows by one entry a week, so a
+   * day-old copy is wrong only about the week currently in progress.
+   */
+  charts: 24 * 3600e3,
+  /**
+   * A weekly chart whose week has ended can never change again (TE-REQ-19),
+   * so this is "forever" in every sense that matters to a browser cache —
+   * the LRU sweep will reclaim it long before it expires.
+   */
+  chart: 10 * 365 * 24 * 3600e3,
+  /** …whereas the week in progress is still being scrobbled into. */
+  chartLive: 30 * 60e3,
 } as const;
 
 export type Kind = keyof typeof TTL;

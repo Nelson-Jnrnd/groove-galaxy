@@ -10,8 +10,9 @@
  *   3. groups are found once the graph is whole;
  *   4. tags and cover art arrive afterwards, enriching a map already in use.
  */
-import * as api from "./lastfm";
-import { adjacency, louvain, type Edge } from "./layout";
+import * as api from "./lastfm.ts";
+import { adjacency, louvain, type Edge, type Neighbour } from "./layout.ts";
+import { describePeriod, periodInfo, type Period } from "./period.ts";
 
 export interface Artist {
   id: number;
@@ -32,6 +33,12 @@ export interface Artist {
    */
   x: number;
   y: number;
+  /**
+   * Rendering opacity, 0–1. Always 1 on a normal map; the timeline uses it
+   * to fade an artist the account was not listening to in the shown year
+   * without disturbing the geometry everything else is placed by.
+   */
+  alpha?: number;
 }
 
 export interface Cluster {
@@ -46,13 +53,16 @@ export interface Cluster {
 /**
  * REQ-2 — the inclusion rule, stated on the page (REQ-3).
  *
- * The cap is what keeps a live build to a few seconds; the floor drops the
- * one-play tail, which has no similarity structure to place it by.
+ * The cap is what keeps a live build to a few seconds (TP-REQ-14); the floor
+ * drops the one-play tail, which has no similarity structure to place it by.
+ * The floor itself lives with the period (TP-REQ-13) — twenty-five plays is
+ * a reasonable bar across a whole history and an impossible one across a
+ * week.
  */
-export const SELECTION = { period: "overall", limit: 300, minPlays: 25 };
+export const SELECTION = { limit: 300 };
 
 /** Bubble radius range, in layout units. */
-const RADIUS = { min: 11, max: 58 };
+export const RADIUS = { min: 11, max: 58 };
 /** Similarity edges kept per artist, strongest first. */
 const EDGES_PER_ARTIST = 10;
 /** Below this match score an edge is too weak to mean anything. */
@@ -72,18 +82,19 @@ const MIN_LABEL_SHARE = 0.4;
 const MIN_QUALIFIED_SHARE = 0.2;
 
 /** Muted, tuned for the off-black ground, assigned by group size (OQ-8). */
-const PALETTE = [
+export const PALETTE = [
   "#e3b23c", "#5fa877", "#6f9fd8", "#c98a9b", "#9b8bd0", "#d98b5f",
   "#6fb3a8", "#b6a98c", "#8fae62", "#cf7f7f", "#7f9ec9", "#c0a5d3",
 ];
 
-const norm = (name: string) => name.toLowerCase().normalize("NFKD").trim();
+export const norm = (name: string) =>
+  name.toLowerCase().normalize("NFKD").trim();
 
 /**
  * REQ-5 / OQ-7 — radius from play count, logarithmically. Play counts run
  * from thousands to tens, so a linear scale would render the tail as dust.
  */
-function radiusFor(plays: number, min: number, max: number) {
+export function radiusFor(plays: number, min: number, max: number) {
   if (max <= min) return (RADIUS.min + RADIUS.max) / 2;
   const t = (Math.log(plays) - Math.log(min)) / (Math.log(max) - Math.log(min));
   return RADIUS.min + (RADIUS.max - RADIUS.min) * Math.pow(t, 0.85);
@@ -104,6 +115,7 @@ export interface BuildEvents {
 
 export interface BuildMeta {
   user: string;
+  period: Period;
   profileUrl: string;
   totalScrobbledArtists: number;
   description: string;
@@ -117,16 +129,18 @@ export class EmptyHistoryError extends Error {}
  */
 export async function build(
   user: string,
+  period: Period,
   events: BuildEvents,
 ): Promise<Artist[]> {
+  const info = periodInfo(period);
   const { artists: top, total } = await api.topArtists(
     user,
-    SELECTION.period,
+    period,
     SELECTION.limit,
   );
 
   const chosen = top
-    .filter((a) => a.plays >= SELECTION.minPlays)
+    .filter((a) => a.plays >= info.minPlays)
     .slice(0, SELECTION.limit);
   if (chosen.length < 3) throw new EmptyHistoryError(user);
 
@@ -134,6 +148,8 @@ export async function build(
   const minPlays = Math.min(...plays);
   const maxPlays = Math.max(...plays);
 
+  // TP-REQ-15 — sized by plays *in this window*, so an artist with hundreds
+  // of lifetime plays and three this month is a small bubble this month.
   const artists: Artist[] = chosen.map((a, i) => ({
     id: i,
     name: a.name,
@@ -150,40 +166,17 @@ export async function build(
 
   events.onArtists(artists, {
     user,
+    period,
     profileUrl: api.profileUrl(user),
     totalScrobbledArtists: total,
-    description:
-      `The ${artists.length} artists ${user} has played most on Last.fm ` +
-      `(minimum ${SELECTION.minPlays} plays), out of ` +
-      `${total.toLocaleString("en-US")} ever scrobbled.`,
+    description: describePeriod(period, user, artists.length, total),
   });
 
   /* ── similarity, streamed ──────────────────────────────────────────── */
 
-  const index = new Map(artists.map((a, i) => [norm(a.name), i]));
-  /** pair key "i:j" (i<j) → strongest match seen in either direction */
-  const pairs = new Map<string, number>();
-  let done = 0;
-
-  await Promise.all(
-    artists.map(async (artist) => {
-      const list = await api.similar(artist.name).catch(() => []);
-      for (const other of list) {
-        const j = index.get(norm(other.name));
-        if (j === undefined || j === artist.id) continue;
-        if (!(other.match >= MIN_MATCH)) continue;
-        const key =
-          artist.id < j ? `${artist.id}:${j}` : `${j}:${artist.id}`;
-        pairs.set(key, Math.max(pairs.get(key) || 0, other.match));
-      }
-      done++;
-      // Republish the graph periodically rather than per artist — the
-      // layout only needs to know roughly as often as it can react.
-      if (done % 15 === 0 || done === artists.length) {
-        events.onEdges(prune(artists, pairs), done, artists.length);
-      }
-    }),
-  );
+  const pairs = await gatherSimilarity(artists, (done, count, soFar) => {
+    events.onEdges(prune(artists, soFar), done, count);
+  });
 
   const edges = prune(artists, pairs);
   attachNeighbours(artists, pairs);
@@ -201,8 +194,50 @@ export async function build(
   return artists;
 }
 
+/**
+ * One similarity lookup per artist, folded into a pair → strongest-match map.
+ *
+ * Shared by the normal map and the timeline's reference graph, because it is
+ * the same question in both cases: similarity is a fact about the artists,
+ * not about when somebody listened to them (TP-PRINCIPLE-1 / TE-REQ-8). The
+ * cache is what makes the second caller nearly free.
+ */
+export async function gatherSimilarity(
+  artists: Artist[],
+  onProgress?: (
+    done: number,
+    total: number,
+    pairs: Map<string, number>,
+  ) => void,
+): Promise<Map<string, number>> {
+  const index = new Map(artists.map((a, i) => [norm(a.name), i]));
+  /** pair key "i:j" (i<j) → strongest match seen in either direction */
+  const pairs = new Map<string, number>();
+  let done = 0;
+
+  await Promise.all(
+    artists.map(async (artist, self) => {
+      const list = await api.similar(artist.name).catch(() => []);
+      for (const other of list) {
+        const j = index.get(norm(other.name));
+        if (j === undefined || j === self) continue;
+        if (!(other.match >= MIN_MATCH)) continue;
+        const key = self < j ? `${self}:${j}` : `${j}:${self}`;
+        pairs.set(key, Math.max(pairs.get(key) || 0, other.match));
+      }
+      done++;
+      // Republish the graph periodically rather than per artist — the
+      // layout only needs to know roughly as often as it can react.
+      if (done % 15 === 0 || done === artists.length) {
+        onProgress?.(done, artists.length, pairs);
+      }
+    }),
+  );
+  return pairs;
+}
+
 /** Keep each artist's strongest edges, so one hub can't dominate the map. */
-function prune(artists: Artist[], pairs: Map<string, number>): Edge[] {
+export function prune(artists: Artist[], pairs: Map<string, number>): Edge[] {
   const perNode: { other: number; w: number }[][] = artists.map(() => []);
   for (const [key, w] of pairs) {
     const [a, b] = key.split(":").map(Number);
@@ -223,7 +258,7 @@ function prune(artists: Artist[], pairs: Map<string, number>): Edge[] {
 }
 
 /** Each artist's closest neighbours, for the detail panel (REQ-13/15). */
-function attachNeighbours(artists: Artist[], pairs: Map<string, number>) {
+export function attachNeighbours(artists: Artist[], pairs: Map<string, number>) {
   const perNode: { other: number; w: number }[][] = artists.map(() => []);
   for (const [key, w] of pairs) {
     const [a, b] = key.split(":").map(Number);
@@ -239,10 +274,7 @@ function attachNeighbours(artists: Artist[], pairs: Map<string, number>) {
 }
 
 /** Louvain community detection over the similarity graph — emergent, not authored. */
-function group(
-  artists: Artist[],
-  adj: { j: number; w: number }[][],
-): Cluster[] {
+export function group(artists: Artist[], adj: Neighbour[][]): Cluster[] {
   const labels = louvain(artists.length, adj);
   const groups = new Map<number, number[]>();
   for (let i = 0; i < artists.length; i++) {
@@ -298,7 +330,7 @@ function fallbackLabel(members: Artist[]): string {
  * distinctive to its members (OQ-4) — common inside the group and rare
  * outside it, so they don't all come out called "electronic".
  */
-async function enrich(
+export async function enrich(
   artists: Artist[],
   clusters: Cluster[],
   events: BuildEvents,
