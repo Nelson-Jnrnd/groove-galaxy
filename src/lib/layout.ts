@@ -338,11 +338,15 @@ export class ForceLayout {
   private random = rng(7);
   private cooled = 0;
 
-  constructor(
-    private readonly iterations = 900,
-    private readonly gravity = 0.6,
-    private readonly padding = 6,
-  ) {}
+  private readonly iterations: number;
+  private readonly gravity: number;
+  private readonly padding: number;
+
+  constructor(iterations = 900, gravity = 0.6, padding = 6) {
+    this.iterations = iterations;
+    this.gravity = gravity;
+    this.padding = padding;
+  }
 
   /** Seed positions and sizes. Safe to call again as artists arrive. */
   reset(points: Point[], radii: number[]) {

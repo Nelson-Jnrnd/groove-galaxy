@@ -1,6 +1,7 @@
 ---
 import BaseLayout from "../layouts/BaseLayout.astro";
 import SiteHeader from "../components/SiteHeader.astro";
+import { PERIODS, DEFAULT_PERIOD } from "../lib/period.ts";
 
 // Whose listening history the map shows by default. A `?user=` parameter
 // overrides it, which is most of what a "show me mine" control will need.
@@ -62,6 +63,35 @@ const DEFAULT_USER = "NestorDHCP";
           <ul class="finder__results" id="results" role="listbox" aria-label="Matching artists" hidden></ul>
         </div>
 
+        <!--
+          The rolling period (TP-REQ-3): always visible, never behind a
+          settings panel, and never showing Last.fm's own names for these
+          windows (TP-REQ-2). "Explore over time" sits apart from it on
+          purpose — "12 months" and "2025" are not two options of the same
+          kind (§33).
+        -->
+        <div class="periods" id="periods" role="group" aria-label="Listening period">
+          {PERIODS.map((p) => (
+            <button
+              type="button"
+              class={`period${p.value === DEFAULT_PERIOD ? " is-on" : ""}`}
+              data-period={p.value}
+              aria-pressed={p.value === DEFAULT_PERIOD ? "true" : "false"}
+              title={`Rebuild the map from ${p.value === "overall" ? "the whole history" : p.phrase}`}
+            >
+              <span aria-hidden="true">{p.short}</span>
+              <span class="sr-only">{p.label}</span>
+            </button>
+          ))}
+          <button
+            type="button"
+            class="period period--timeline"
+            id="timeline-enter"
+            aria-pressed="false"
+            title="Move through this account's listening year by year"
+          >Explore over time →</button>
+        </div>
+
         <div class="zoom" role="group" aria-label="Zoom and view">
           <button type="button" class="zoom__btn" id="zoom-out" aria-label="Zoom out">−</button>
           <button type="button" class="zoom__btn" id="zoom-in" aria-label="Zoom in">+</button>
@@ -116,6 +146,29 @@ const DEFAULT_USER = "NestorDHCP";
 
       <!-- ─── Detail panel (REQ-14/15) ─── -->
       <aside class="detail" id="detail" tabindex="-1" aria-label="Artist detail" hidden></aside>
+    </div>
+
+    <!--
+      The one thing spoken aloud. The caption ticks over every fifteen
+      artists while a graph builds and every frame while the timeline plays;
+      that is progress worth seeing and not worth hearing (TP-REQ-25,
+      TE-REQ-32/33).
+    -->
+    <p class="sr-only" id="live" role="status" aria-live="polite"></p>
+
+    <!-- ─── Taste Evolution controls (§29) ─── -->
+    <div class="timeline" id="timeline" hidden>
+      <div class="timeline__bar">
+        <div class="timeline__transport" role="group" aria-label="Move through time">
+          <button type="button" class="timeline__btn" id="timeline-prev" aria-label="Previous year">◀</button>
+          <button type="button" class="timeline__btn timeline__btn--play" id="timeline-play" aria-pressed="false">▶ Play</button>
+          <button type="button" class="timeline__btn" id="timeline-next" aria-label="Next year">▶</button>
+        </div>
+        <ul class="timeline__frames" id="timeline-frames" aria-label="Years"></ul>
+        <button type="button" class="timeline__exit" id="timeline-exit">Exit timeline</button>
+      </div>
+      <p class="timeline__status quiet" id="timeline-status"></p>
+      <div class="timeline__summary" id="timeline-summary"></div>
     </div>
 
     <!-- ─── Caption strip: what you're looking at (REQ-3, REQ-25) ─── -->
@@ -189,10 +242,13 @@ const DEFAULT_USER = "NestorDHCP";
 
           <dt>How big a bubble is</dt>
           <dd>
-            Bubble size follows how much I have actually listened to that
-            artist — my own scrobble count, not the artist's popularity. The
-            scale is logarithmic, so an artist with a few dozen plays is still
-            visible next to one with several thousand.
+            Bubble size follows how much this account has actually listened to
+            that artist — their own scrobble count, not the artist's
+            popularity — counted inside whichever period is selected above, or
+            inside the selected year in the timeline. Never a lifetime total
+            shown on a map of one month. The scale is logarithmic, so an artist
+            with a few dozen plays is still visible next to one with several
+            thousand.
           </dd>
 
           <dt>Why bubbles sit where they sit</dt>
@@ -222,6 +278,24 @@ const DEFAULT_USER = "NestorDHCP";
             Grey bubbles are artists with no strong tie to anything else here.
           </dd>
 
+          <dt>Moving through time</dt>
+          <dd>
+            The period buttons rebuild the map from one of Last.fm's rolling
+            windows — the last week, month, three months, six months, year, or
+            the whole history. Bubble size is always plays inside the window
+            you picked, never lifetime plays.
+            <br /><br />
+            "Explore over time" is a different thing. Last.fm cannot report an
+            arbitrary calendar year, so those years are reconstructed from its
+            weekly charts: one chart per week, added up. A week that straddles
+            New Year is counted whole, in whichever year contains the middle
+            of that week — so the boundaries follow Last.fm's own weekly
+            granularity rather than the calendar exactly. Positions, groups and
+            colours are worked out once for the whole timeline and then held
+            still: when a year changes, what changes is how much each artist
+            was played, because that is the only thing that actually changed.
+          </dd>
+
           <dt>Where it comes from</dt>
           <dd id="about-fresh"></dd>
         </dl>
@@ -237,6 +311,6 @@ const DEFAULT_USER = "NestorDHCP";
 </BaseLayout>
 
 <script>
-  import { start } from "../scripts/map";
+  import { start } from "../scripts/map.ts";
   start();
 </script>

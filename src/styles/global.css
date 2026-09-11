@@ -540,6 +540,166 @@ p { margin: 0; }
   color: var(--text-faint);
 }
 
+/* ---------- rolling period control (TP-REQ-3/4) ---------- */
+.periods {
+  display: flex;
+  align-items: center;
+  gap: 0.2rem;
+  flex: 0 1 auto;
+  min-width: 0;
+  padding: 0.2rem;
+  background: var(--bg-panel);
+  border: 1px solid var(--border-strong);
+  border-radius: 9px;
+  backdrop-filter: blur(8px);
+  /* Six windows plus the timeline door don't fit a phone; the row scrolls
+     rather than wrapping into the map. */
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.periods::-webkit-scrollbar { display: none; }
+.period {
+  appearance: none;
+  -webkit-appearance: none;
+  flex: 0 0 auto;
+  cursor: pointer;
+  background: none;
+  border: 0;
+  border-radius: 6px;
+  padding: 0.3rem 0.5rem;
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  letter-spacing: 0.06em;
+  color: var(--text-faint);
+  transition: color 0.15s ease, background 0.15s ease;
+}
+.period:hover { color: var(--text); background: rgba(236, 233, 225, 0.06); }
+.period.is-on,
+.period[aria-pressed="true"] {
+  color: var(--bg);
+  background: var(--gold-soft);
+}
+.period--timeline {
+  margin-left: 0.2rem;
+  padding-left: 0.6rem;
+  border-left: 1px solid var(--border-strong);
+  color: var(--green);
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+.period--timeline:hover { color: var(--text); }
+.period--timeline[aria-pressed="true"] { background: var(--green-soft); color: var(--bg); }
+
+/* While a new period is being fetched the working map stays put and dims,
+   rather than flashing to an empty canvas (§9). */
+.stage[data-busy="true"] .stage__canvas { opacity: 0.35; transition: opacity 0.2s ease; }
+.stage[data-busy="true"] { cursor: progress; }
+
+/* ---------- the timeline (§29) ---------- */
+.timeline {
+  flex: 0 0 auto;
+  border-top: 1px solid var(--border);
+  background: var(--bg-soft);
+  padding: 0.5rem var(--pad) 0.6rem;
+}
+.timeline__bar {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  min-width: 0;
+}
+.timeline__transport { display: flex; gap: 0.25rem; flex: 0 0 auto; }
+.timeline__btn,
+.timeline__exit {
+  appearance: none;
+  -webkit-appearance: none;
+  cursor: pointer;
+  color: var(--text-dim);
+  background: var(--bg-panel);
+  border: 1px solid var(--border-strong);
+  border-radius: 7px;
+  padding: 0.35rem 0.55rem;
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  line-height: 1;
+}
+.timeline__btn:hover:not(:disabled),
+.timeline__exit:hover { color: var(--text); }
+.timeline__btn:disabled { opacity: 0.4; cursor: default; }
+.timeline__btn--play { min-width: 5.2rem; }
+.timeline__btn--play[aria-pressed="true"] { color: var(--green); border-color: var(--green-soft); }
+.timeline__exit { flex: 0 0 auto; margin-left: auto; color: var(--gold); }
+
+.timeline__frames {
+  display: flex;
+  gap: 0.2rem;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
+.timeline__frame {
+  appearance: none;
+  -webkit-appearance: none;
+  cursor: pointer;
+  flex: 0 0 auto;
+  background: none;
+  border: 0;
+  border-radius: 6px;
+  padding: 0.32rem 0.5rem;
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  color: var(--text-faint);
+}
+.timeline__frame:hover:not(:disabled) { color: var(--text); background: rgba(236, 233, 225, 0.06); }
+.timeline__frame:disabled { opacity: 0.4; cursor: default; }
+.timeline__frame[aria-pressed="true"] { color: var(--bg); background: var(--green-soft); }
+
+.timeline__status { margin-top: 0.35rem; }
+.timeline__summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.15rem 0.9rem;
+  margin-top: 0.3rem;
+  font-family: var(--mono);
+  font-size: 0.7rem;
+  color: var(--text-dim);
+}
+.timeline__year { color: var(--gold); letter-spacing: 0.08em; }
+.timeline__fact { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
+.timeline__fact--quiet { color: var(--text-faint); }
+
+/* The artist panel, in a year (§37) */
+.detail__temporal {
+  margin-top: 0.6rem;
+  padding: 0.5rem 0.6rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: rgba(236, 233, 225, 0.03);
+  font-size: 0.78rem;
+  color: var(--text-dim);
+}
+.detail__temporal-head {
+  font-family: var(--mono);
+  font-size: 0.7rem;
+  letter-spacing: 0.1em;
+  color: var(--green);
+  margin-bottom: 0.2rem;
+}
+.detail__temporal-line { line-height: 1.5; }
+
+@media (max-width: 44rem) {
+  .controls { flex-wrap: wrap; }
+  .periods { order: 3; flex: 1 1 100%; }
+  .timeline__bar { flex-wrap: wrap; }
+  .timeline__exit { order: -1; }
+  .timeline__frames { order: 3; flex: 1 1 100%; }
+  .timeline__summary { font-size: 0.66rem; }
+}
+
 /* ---------- caption strip ---------- */
 .caption {
   flex: 0 0 auto;
@@ -556,7 +716,17 @@ p { margin: 0; }
   letter-spacing: 0.015em;
   color: var(--text-faint);
 }
-.caption__meta { display: flex; align-items: center; gap: 0.85rem; flex: 0 0 auto; }
+.caption__meta {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem 0.85rem;
+  flex: 0 1 auto;
+  min-width: 0;
+  /* The status line grows with what the map is doing ("2023 · 59,436 mapped
+     plays"), so it wraps rather than pushing the strip off a phone. */
+  flex-wrap: wrap;
+  overflow-wrap: anywhere;
+}
 .caption__link {
   appearance: none;
   -webkit-appearance: none;
@@ -627,6 +797,7 @@ p { margin: 0; }
   /* The inclusion rule still has to be legible (REQ-3), but it must not eat
      a quarter of a phone screen — the full sentence is in the method note. */
   .caption { font-size: 0.66rem; gap: 0.4rem 0.75rem; }
+  .caption__scope { flex: 1 1 100%; }
   .caption__scope {
     display: -webkit-box;
     -webkit-line-clamp: 2;

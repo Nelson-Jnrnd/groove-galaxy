@@ -6,7 +6,7 @@
  * all. Requests run through one shared pool so that the background work
  * (tags, cover art) can never starve the thing the map is waiting on.
  */
-import * as cache from "./cache";
+import * as cache from "./cache.ts";
 
 const ENDPOINT = "https://ws.audioscrobbler.com/2.0/";
 
@@ -73,11 +73,12 @@ function pump() {
 /* ─── one API call ───────────────────────────────────────────────────── */
 
 export class LastFmError extends Error {
-  constructor(
-    message: string,
-    readonly code: number,
-  ) {
+  /** Last.fm's own error number, or the HTTP status when it didn't give one. */
+  readonly code: number;
+
+  constructor(message: string, code: number) {
     super(message);
+    this.code = code;
   }
 }
 
@@ -257,6 +258,128 @@ export async function artwork(artist: string): Promise<string> {
     }
     return "";
   });
+}
+
+/* ─── the historical calls (Taste Evolution) ─────────────────────────── */
+
+export interface ChartWeek {
+  /** Unix seconds, inclusive start of the week Last.fm charted. */
+  from: number;
+  /** Unix seconds, exclusive-ish end of that week. */
+  to: number;
+}
+
+/**
+ * Every week Last.fm has a chart for, oldest first. One call, and it changes
+ * only when a week ends — so it is cached for a day (TE-REQ-19) and is the
+ * cheapest possible way to learn how far back an account goes.
+ */
+export async function weeklyChartList(user: string): Promise<ChartWeek[]> {
+  return cached("charts", user, async () => {
+    const data = await call(
+      { method: "user.getweeklychartlist", user },
+      false,
+    );
+    const block = data.weeklychartlist as { chart?: unknown } | undefined;
+    return list<{ from?: string; to?: string }>(block?.chart)
+      .map((c) => ({ from: Number(c.from), to: Number(c.to) }))
+      .filter((c) => Number.isFinite(c.from) && Number.isFinite(c.to) && c.to > c.from)
+      .sort((a, b) => a.from - b.from);
+  });
+}
+
+/**
+ * When this account's history actually begins, in unix seconds — or 0 when
+ * that can't be established.
+ *
+ * `user.getWeeklyChartList` answers with every week since the account was
+ * *created*, which for a long-dormant registration can be two decades of
+ * weeks that provably contain nothing: one measured account lists 1,125
+ * weeks and started scrobbling in week 843. Fetching those charts costs a
+ * request each to be told "nothing", which is most of what makes a first
+ * timeline slow.
+ *
+ * The recent-tracks feed is paginated newest-first and reports its own page
+ * count, so the oldest scrobble is exactly two requests away: one for the
+ * total, one for the last page. Exact, not a heuristic — no week that could
+ * contain listening is skipped.
+ */
+export async function firstScrobble(user: string): Promise<number> {
+  return cached("first", user, async () => {
+    const head = await call(
+      { method: "user.getrecenttracks", user, limit: "1" },
+      false,
+    ).catch(() => null);
+    const attr = (
+      head?.recenttracks as { "@attr"?: { totalPages?: string } } | undefined
+    )?.["@attr"];
+    const pages = Number(attr?.totalPages) || 0;
+    if (pages < 1) return 0;
+
+    const tail = await call(
+      {
+        method: "user.getrecenttracks",
+        user,
+        limit: "1",
+        page: String(pages),
+      },
+      false,
+    ).catch(() => null);
+    const track = list<{ date?: { uts?: string } }>(
+      (tail?.recenttracks as { track?: unknown } | undefined)?.track,
+    )[0];
+    // A track with no date is the one playing right now, which cannot be the
+    // oldest unless it is also the only one — either way, 0 means "don't
+    // trim", and a whole history is read rather than risking losing any of it.
+    return Number(track?.date?.uts) || 0;
+  });
+}
+
+/** The weeks that could contain listening, given a known first scrobble. */
+export function weeksSince(weeks: ChartWeek[], first: number): ChartWeek[] {
+  if (!(first > 0)) return weeks;
+  return weeks.filter((w) => w.to >= first);
+}
+
+/**
+ * What an account played during one historical week.
+ *
+ * A week that has already ended can never change, so it is filed under a
+ * cache kind that keeps it effectively forever; the week currently in
+ * progress gets a short life instead. Background priority: the normal map is
+ * never waiting on history, and a decade of weeks must not be allowed to
+ * starve it.
+ */
+export async function weeklyArtistChart(
+  user: string,
+  week: ChartWeek,
+  { complete = week.to * 1000 < Date.now() }: { complete?: boolean } = {},
+): Promise<TopArtist[]> {
+  return cached(
+    complete ? "chart" : "chartLive",
+    `${user}|${week.from}|${week.to}`,
+    async () => {
+      const data = await call(
+        {
+          method: "user.getweeklyartistchart",
+          user,
+          from: String(week.from),
+          to: String(week.to),
+        },
+        true,
+      );
+      const block = data.weeklyartistchart as { artist?: unknown } | undefined;
+      return list<{ name?: string; playcount?: string; url?: string }>(
+        block?.artist,
+      )
+        .map((a) => ({
+          name: (a.name || "").trim(),
+          plays: Number(a.playcount) || 0,
+          url: a.url || "",
+        }))
+        .filter((a) => a.name && a.plays > 0);
+    },
+  );
 }
 
 export const profileUrl = (user: string) =>
