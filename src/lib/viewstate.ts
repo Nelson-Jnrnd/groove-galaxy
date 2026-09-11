@@ -17,6 +17,32 @@ export interface ViewState {
   mode: "map" | "timeline";
   /** Selected historical frame, e.g. "2024". Null means "pick a sensible one". */
   frame: string | null;
+  /**
+   * The artist whose System is open, if any (EXP §17).
+   *
+   * An artist *name*, not an id: cluster numbers and bubble ids are
+   * artefacts of one particular build of one particular map, whereas a name
+   * still means the same artist after the map is rebuilt, or on somebody
+   * else's Galaxy entirely. Exploration is a layer over the map named here,
+   * not a separate mode — the Galaxy stays built underneath it, which is
+   * what lets `Return to Galaxy` put the visitor back where they were.
+   */
+  explore: string | null;
+}
+
+/**
+ * Long enough for any real artist name, short enough that a hand-written
+ * URL can't push an essay into the page (§24: malformed exploration
+ * parameters degrade to the plain Galaxy).
+ */
+const MAX_EXPLORE = 120;
+
+function parseExplore(raw: string | null): string | null {
+  const name = (raw || "").trim().replace(/\s+/g, " ");
+  if (!name || name.length > MAX_EXPLORE) return null;
+  // Control characters are never part of a name and would land in the DOM.
+  if (/[\u0000-\u001f\u007f]/.test(name)) return null;
+  return name;
 }
 
 /** Frames are years for now; the id shape leaves room for "2024-08" (TE-REQ-4). */
@@ -32,7 +58,15 @@ export function parseView(search: string, defaultUser: string): ViewState {
   const user = (params.get("user") || "").trim() || defaultUser;
   const period = parsePeriod(params.get("period"));
   const timeline = (params.get("view") || "").trim().toLowerCase() === "timeline";
-  if (!timeline) return { user, period, mode: "map", frame: null };
+  if (!timeline) {
+    return {
+      user,
+      period,
+      mode: "map",
+      frame: null,
+      explore: parseExplore(params.get("explore")),
+    };
+  }
 
   // `month` is accepted ahead of monthly resolution shipping, so a link made
   // later still opens the right account rather than 404-ing on a parameter.
@@ -42,6 +76,9 @@ export function parseView(search: string, defaultUser: string): ViewState {
     period,
     mode: "timeline",
     frame: raw && isFrameId(raw) ? raw : null,
+    // §19 — exploration runs from rolling-period Galaxies only, so the
+    // parameter is dropped rather than half-honoured in a historical frame.
+    explore: null,
   };
 }
 
@@ -61,13 +98,20 @@ export function toSearch(state: ViewState): string {
     // The rolling window is remembered so that leaving the timeline returns
     // to the map the visitor came from rather than resetting to all time.
     if (state.period !== DEFAULT_PERIOD) params.set("period", state.period);
-  } else if (state.period !== DEFAULT_PERIOD) {
-    params.set("period", state.period);
+  } else {
+    if (state.period !== DEFAULT_PERIOD) params.set("period", state.period);
+    if (state.explore) params.set("explore", state.explore);
   }
   return `?${params.toString()}`;
 }
 
-/** Two states describe the same map — nothing to rebuild. */
+/**
+ * Two states describe the same map — nothing to rebuild.
+ *
+ * Deliberately blind to `explore`: travelling between Systems changes the
+ * URL and the history entry, but the Galaxy underneath is the same one and
+ * must not be torn down and refetched to show a different neighbourhood.
+ */
 export function sameView(a: ViewState, b: ViewState): boolean {
   return (
     a.user.toLowerCase() === b.user.toLowerCase() &&

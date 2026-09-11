@@ -939,3 +939,295 @@ p { margin: 0; }
   font-weight: 500;
 }
 .account__btn--go:hover { background: var(--gold-soft); border-color: var(--gold-soft); color: var(--bg); }
+
+/* ------------------------------------------------------------------ *
+   Exploration Mode (EXP §7, §9, §11)
+
+   Two visual languages sit side by side here, and the whole feature
+   depends on them staying apart. Known territory keeps the map's own
+   treatment: its group colour, a solid rim, full-strength artwork.
+   Anything beyond the Galaxy is neutral, lighter, and ringed with a
+   dashed border — a different *shape*, not just a different hue, so the
+   distinction survives being read in greyscale or by somebody who does
+   not see colour differences (§7, §21).
+ * ------------------------------------------------------------------ */
+
+/* ---------- Cluster Focus ---------- */
+.cluster {
+  position: absolute;
+  z-index: 8;
+  top: calc(var(--pad) + 3rem);
+  left: var(--pad);
+  width: min(20rem, calc(100vw - 2 * var(--pad)));
+  max-height: calc(100% - 4.5rem - var(--pad));
+  overflow-y: auto;
+  padding: 1rem 1rem 1.15rem;
+  background: var(--bg-panel);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  backdrop-filter: blur(12px);
+  box-shadow: 0 18px 44px rgba(0, 0, 0, 0.5);
+}
+@media (prefers-reduced-motion: no-preference) {
+  .cluster { animation: panel-in 0.18s ease both; }
+}
+.cluster__kicker {
+  font-family: var(--mono);
+  font-size: 0.66rem;
+  letter-spacing: 0.11em;
+  text-transform: uppercase;
+  color: var(--green);
+  padding-right: 1.6rem;
+}
+.cluster__title {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  margin: 0.25rem 0 0.35rem;
+  font-size: 1.18rem;
+  font-weight: 500;
+  line-height: 1.25;
+}
+.cluster__swatch { width: 0.6rem; height: 0.6rem; border-radius: 50%; flex: 0 0 auto; }
+.cluster__facts { font-size: 0.85rem; color: var(--text-dim); }
+.cluster__head {
+  margin-top: 0.9rem;
+  font-family: var(--mono);
+  font-size: 0.66rem;
+  letter-spacing: 0.11em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+.cluster__core {
+  list-style: none;
+  margin: 0.4rem 0 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+}
+.cluster__core-btn {
+  appearance: none;
+  -webkit-appearance: none;
+  cursor: pointer;
+  padding: 0.22rem 0.55rem;
+  color: var(--text-dim);
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-family: var(--sans);
+  font-size: 0.8rem;
+}
+.cluster__core-btn:hover {
+  color: var(--text);
+  border-color: var(--border-strong);
+  background: rgba(236, 233, 225, 0.05);
+}
+.cluster__why {
+  margin-top: 0.55rem;
+  font-size: 0.78rem;
+  line-height: 1.5;
+  color: var(--text-faint);
+}
+.cluster__frontier { list-style: none; margin: 0.45rem 0 0; padding: 0; display: grid; gap: 0.12rem; }
+.frontier-item {
+  appearance: none;
+  -webkit-appearance: none;
+  cursor: pointer;
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.32rem 0.4rem;
+  color: var(--text-dim);
+  background: none;
+  border: 1px dashed var(--border-strong);
+  border-radius: 7px;
+  font-family: var(--sans);
+  font-size: 0.84rem;
+  text-align: left;
+}
+.frontier-item:hover { color: var(--text); background: rgba(236, 233, 225, 0.06); }
+.frontier-item__name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.frontier-item__support {
+  font-family: var(--mono);
+  font-size: 0.66rem;
+  color: var(--text-faint);
+  flex: 0 0 auto;
+}
+
+/* A frontier artist's own panel: neutral, never a cluster colour. */
+.detail__art--frontier { filter: grayscale(0.55) contrast(0.95); }
+.detail__kicker--frontier { color: var(--text-dim); }
+.detail__swatch--frontier {
+  width: 0.6rem;
+  height: 0.6rem;
+  border-radius: 50%;
+  border: 1px dashed rgba(236, 233, 225, 0.7);
+  background: none;
+}
+.detail__explore {
+  appearance: none;
+  -webkit-appearance: none;
+  cursor: pointer;
+  margin-top: 0.75rem;
+  width: 100%;
+  padding: 0.45rem 0.7rem;
+  color: var(--bg);
+  background: var(--gold);
+  border: 1px solid var(--gold);
+  border-radius: 8px;
+  font-family: var(--sans);
+  font-size: 0.85rem;
+  font-weight: 500;
+}
+.detail__explore:hover { background: var(--gold-soft); border-color: var(--gold-soft); }
+
+/* ---------- System View ---------- */
+.stage__canvas--explore { position: absolute; inset: 0; z-index: 4; }
+/* While exploring, the Galaxy's own furniture steps aside — but the map
+   itself is never torn down, so coming back is instant and unchanged. */
+.stage[data-explore="true"] #canvas,
+.stage[data-explore="true"] .controls,
+.stage[data-explore="true"] .legend,
+.stage[data-explore="true"] .cluster,
+.stage[data-explore="true"] #detail { display: none !important; }
+
+.explore {
+  position: absolute;
+  z-index: 9;
+  top: var(--pad);
+  left: var(--pad);
+  right: var(--pad);
+  display: grid;
+  gap: 0.4rem;
+  pointer-events: none;
+}
+.explore > * { pointer-events: auto; }
+.explore__bar {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+  padding: 0.4rem 0.5rem;
+  background: var(--bg-panel);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  backdrop-filter: blur(12px);
+}
+.explore__actions { display: flex; align-items: center; gap: 0.35rem; margin-left: auto; }
+.explore__period {
+  font-family: var(--mono);
+  font-size: 0.66rem;
+  color: var(--text-faint);
+  margin-right: 0.2rem;
+}
+.explore__btn {
+  appearance: none;
+  -webkit-appearance: none;
+  cursor: pointer;
+  color: var(--text-dim);
+  background: none;
+  border: 1px solid var(--border-strong);
+  border-radius: 7px;
+  padding: 0.35rem 0.6rem;
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  line-height: 1;
+}
+.explore__btn:hover { color: var(--text); }
+.explore__btn--exit { color: var(--gold); }
+
+.trail {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  flex: 1 1 12rem;
+  min-width: 0;
+  overflow: hidden;
+}
+.trail__step {
+  appearance: none;
+  -webkit-appearance: none;
+  cursor: pointer;
+  color: var(--text-dim);
+  background: none;
+  border: none;
+  padding: 0.2rem 0.3rem;
+  font-family: var(--sans);
+  font-size: 0.84rem;
+  max-width: 11rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.trail__step:hover { color: var(--text); text-decoration: underline; }
+.trail__step--home { color: var(--gold); }
+.trail__step.is-here { color: var(--text); font-weight: 500; cursor: default; }
+.trail__sep, .trail__ellipsis { color: var(--text-faint); font-size: 0.8rem; flex: 0 0 auto; }
+
+.explore__key {
+  list-style: none;
+  margin: 0;
+  padding: 0.3rem 0.5rem;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  width: fit-content;
+  max-width: 100%;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 0.75rem;
+  color: var(--text-dim);
+}
+.explore__key li { display: flex; align-items: center; gap: 0.35rem; }
+.key__dot { width: 0.7rem; height: 0.7rem; border-radius: 50%; flex: 0 0 auto; }
+.key__dot--galaxy { background: rgba(227, 178, 60, 0.5); border: 1px solid var(--gold); }
+.key__dot--frontier { background: none; border: 1px dashed rgba(236, 233, 225, 0.75); }
+.key__dot--explored { background: none; border: 1px solid var(--green); box-shadow: 0 0 0 2px rgba(95, 168, 119, 0.3); }
+
+.explore__status {
+  width: fit-content;
+  max-width: 100%;
+  padding: 0.25rem 0.5rem;
+  background: var(--bg-panel);
+  border-radius: 8px;
+  font-size: 0.78rem;
+}
+
+.detail--explore { top: calc(var(--pad) + 5.5rem); }
+.near__badge {
+  font-family: var(--mono);
+  font-size: 0.6rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+  flex: 0 0 auto;
+}
+.near__badge--galaxy { color: var(--gold); }
+.near__badge--explored { color: var(--green); }
+.near--frontier, .near--explored { border-left: 2px dashed var(--border-strong); }
+
+@media (max-width: 44rem) {
+  /* On a phone the two panels would fight for the same screen, so the
+     region panel gives way to whatever artist is actually open. */
+  .stage[data-detail="true"] .cluster { display: none !important; }
+  .cluster {
+    top: auto;
+    bottom: var(--pad);
+    left: var(--pad);
+    right: var(--pad);
+    width: auto;
+    max-height: 48%;
+  }
+  .detail--explore {
+    top: auto;
+    bottom: var(--pad);
+    left: var(--pad);
+    right: var(--pad);
+    width: auto;
+    max-height: 46%;
+  }
+  .trail__step { max-width: 7rem; }
+}

@@ -16,6 +16,14 @@ const DEFAULT_USER = "NestorDHCP";
     <div class="stage" id="stage" data-state="loading" data-default-user={DEFAULT_USER}>
       <canvas id="canvas" class="stage__canvas"></canvas>
 
+      <!--
+        Exploration draws on its own canvas rather than borrowing the map's,
+        so the Galaxy underneath keeps its layout, its viewport and whichever
+        region was focused — which is what makes "Return to Galaxy" a matter
+        of taking this away again (EXP-REQ-19).
+      -->
+      <canvas id="explore-canvas" class="stage__canvas stage__canvas--explore" hidden></canvas>
+
       <!-- Lightweight hover/focus feedback before committing to a click (REQ-20) -->
       <div class="tip" id="tip" role="presentation" hidden></div>
 
@@ -118,7 +126,8 @@ const DEFAULT_USER = "NestorDHCP";
             Colours mark groups the similarity data fell into on its own. Each
             name is the tag most distinctive to that group's artists — a
             description of what landed there, not a label anything was sorted
-            by.
+            by. Pick one to zoom into that region and see the artists sitting
+            just beyond it.
           </p>
           <ul class="legend__list" id="legend-list"></ul>
         </div>
@@ -146,6 +155,50 @@ const DEFAULT_USER = "NestorDHCP";
 
       <!-- ─── Detail panel (REQ-14/15) ─── -->
       <aside class="detail" id="detail" tabindex="-1" aria-label="Artist detail" hidden></aside>
+
+      <!--
+        Cluster Focus (EXP-REQ-2): what this region of the Galaxy is, and
+        which artists sit immediately outside it. The frontier is listed as
+        well as drawn, so it is reachable by keyboard and readable on a
+        phone.
+      -->
+      <aside
+        class="cluster"
+        id="cluster-panel"
+        tabindex="-1"
+        aria-label="Region detail"
+        hidden
+      ></aside>
+
+      <!-- ─── Exploration Mode (EXP §9–§11) ─── -->
+      <div class="explore" id="explore" hidden>
+        <div class="explore__bar">
+          <nav class="trail" id="explore-trail" aria-label="Exploration trail"></nav>
+          <div class="explore__actions">
+            <!-- The period this exploration inherited (§18): which Galaxy
+                 "beyond your Galaxy" is measured against. -->
+            <p class="explore__period quiet" id="explore-period"></p>
+            <button type="button" class="explore__btn" id="explore-back">← Back</button>
+            <button type="button" class="explore__btn explore__btn--exit" id="explore-exit">
+              Return to Galaxy
+            </button>
+          </div>
+        </div>
+        <ul class="explore__key" aria-label="What the shapes mean">
+          <li><span class="key__dot key__dot--galaxy" aria-hidden="true"></span>In your Galaxy</li>
+          <li><span class="key__dot key__dot--frontier" aria-hidden="true"></span>Beyond your Galaxy</li>
+          <li><span class="key__dot key__dot--explored" aria-hidden="true"></span>Already explored</li>
+        </ul>
+        <p class="explore__status quiet" id="explore-status" role="status"></p>
+      </div>
+
+      <aside
+        class="detail detail--explore"
+        id="explore-detail"
+        tabindex="-1"
+        aria-label="Artist detail"
+        hidden
+      ></aside>
     </div>
 
     <!--
@@ -294,6 +347,25 @@ const DEFAULT_USER = "NestorDHCP";
             colours are worked out once for the whole timeline and then held
             still: when a year changes, what changes is how much each artist
             was played, because that is the only thing that actually changed.
+          </dd>
+
+          <dt>Going beyond the map</dt>
+          <dd>
+            The map is the territory this account has actually listened to.
+            Last.fm's similarity data reaches past it, and exploring is how
+            you cross that border. Picking a group in the legend zooms into
+            that region and works out which artists just outside the map its
+            members point at — each one shown with the artists on the map
+            responsible for it. Opening any artist's own system recentres
+            everything on them: the artists closest to them in the data sit
+            nearest, whether or not this account has ever played them. Each
+            step outward asks Last.fm about exactly one more artist, and the
+            trail along the top always shows the way back.
+            <br /><br />
+            "Beyond your Galaxy" means "not in the artist set this map is
+            showing" — which depends on the period you picked. It is not a
+            claim that the account has never listened to them; that is
+            something this page has no way to know, so it never says it.
           </dd>
 
           <dt>Where it comes from</dt>

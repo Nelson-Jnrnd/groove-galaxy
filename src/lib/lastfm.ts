@@ -198,11 +198,15 @@ export async function topArtists(
  */
 export async function similar(artist: string): Promise<SimilarArtist[]> {
   return cached("similar", artist, async () => {
+    // A failure throws rather than resolving to an empty list: the two mean
+    // very different things once exploration can travel to an artist on the
+    // strength of this answer — "nobody sounds like them" is a destination,
+    // "the request didn't come back" is a retry — and caching a failure as
+    // an empty list would make a moment's trouble stick for a month.
     const data = await call(
       { method: "artist.getsimilar", artist, autocorrect: "1", limit: "100" },
       false,
-    ).catch(() => null);
-    if (!data) return [];
+    );
     const block = data.similarartists as { artist?: unknown } | undefined;
     return list<{ name?: string; match?: string }>(block?.artist)
       .map((a) => ({ name: (a.name || "").trim(), match: Number(a.match) }))

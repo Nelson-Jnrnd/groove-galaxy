@@ -72,6 +72,7 @@ test("a bare URL is the account's all-time map", () => {
     period: "overall",
     mode: "map",
     frame: null,
+    explore: null,
   });
   assert.equal(toSearch(state), "?user=NestorDHCP");
 });
@@ -142,4 +143,53 @@ test("sameView knows what counts as the same map", () => {
   assert.ok(
     sameView(y2024, parseView("?user=someone&view=timeline&year=2024&period=6month", DEFAULT_USER)),
   );
+});
+
+/* ─── exploration (EXP §17, §24) ─────────────────────────────────────── */
+
+test("an exploration URL reopens the account, the period and the artist", () => {
+  const state = parseView("?user=someone&period=3month&explore=Justice", DEFAULT_USER);
+  assert.equal(state.mode, "map");
+  assert.equal(state.explore, "Justice");
+  assert.equal(toSearch(state), "?user=someone&period=3month&explore=Justice");
+  assert.deepEqual(parseView(toSearch(state), DEFAULT_USER), state);
+});
+
+test("an artist name is the anchor, so it survives a rebuilt map (§17)", () => {
+  // Names round-trip through the URL whatever is in them; cluster ids are
+  // deliberately never in there at all.
+  const state = parseView("?user=someone&explore=L%27Imp%C3%A9ratrice", DEFAULT_USER);
+  assert.equal(state.explore, "L'Impératrice");
+  assert.doesNotMatch(toSearch(state), /cluster/);
+  assert.deepEqual(parseView(toSearch(state), DEFAULT_USER), state);
+});
+
+test("a malformed exploration parameter degrades to the plain Galaxy (§24)", () => {
+  assert.equal(parseView("?explore=", DEFAULT_USER).explore, null);
+  assert.equal(parseView("?explore=%20%20", DEFAULT_USER).explore, null);
+  assert.equal(parseView(`?explore=${"x".repeat(400)}`, DEFAULT_USER).explore, null);
+  assert.equal(parseView("?explore=bad%00name", DEFAULT_USER).explore, null);
+  // …and the rest of the view still opens normally.
+  const state = parseView("?user=someone&period=6month&explore=", DEFAULT_USER);
+  assert.equal(state.user, "someone");
+  assert.equal(state.period, "6month");
+  assert.equal(state.mode, "map");
+});
+
+test("exploration is dropped in timeline mode, which is out of scope (§19)", () => {
+  const state = parseView("?view=timeline&year=2024&explore=Justice", DEFAULT_USER);
+  assert.equal(state.mode, "timeline");
+  assert.equal(state.explore, null);
+  assert.doesNotMatch(toSearch(state), /explore/);
+});
+
+test("travelling between systems is not a different map (EXP-REQ-19)", () => {
+  // sameView is what stops the Galaxy being torn down and rebuilt on every
+  // hop — the exploration is a layer over it, not a replacement for it.
+  const galaxy = parseView("?user=someone&period=3month", DEFAULT_USER);
+  const exploring = parseView("?user=someone&period=3month&explore=Justice", DEFAULT_USER);
+  const further = parseView("?user=someone&period=3month&explore=Breakbot", DEFAULT_USER);
+  assert.ok(sameView(galaxy, exploring));
+  assert.ok(sameView(exploring, further));
+  assert.ok(!sameView(exploring, parseView("?user=someone&period=6month&explore=Justice", DEFAULT_USER)));
 });
