@@ -18,12 +18,21 @@
 import {
   build,
   EmptyHistoryError,
+  norm,
   type Artist,
   type BuildMeta,
   type Cluster,
 } from "../lib/build.ts";
 import * as cache from "../lib/cache.ts";
-import { LastFmError, RATE_LIMITED, USER_NOT_FOUND } from "../lib/lastfm.ts";
+import {
+  aggregateFrontier,
+  FRONTIER_LIMIT,
+  galaxyIndex,
+  placeFrontier,
+  type ExploreOrigin,
+  type FrontierCandidate,
+} from "../lib/explore.ts";
+import * as api from "../lib/lastfm.ts";
 import {
   adjacency,
   ForceLayout,
@@ -34,6 +43,7 @@ import {
 } from "../lib/layout.ts";
 import { PERIODS, periodInfo, type Period } from "../lib/period.ts";
 import { parseView, sameView, toSearch, type ViewState } from "../lib/viewstate.ts";
+import type { Explorer } from "./explorer.ts";
 
 /* ─── Constants ──────────────────────────────────────────────────────── */
 
@@ -66,8 +76,25 @@ const UPGRADE_AT = 34;
  */
 const MAX_CONCURRENT_IMAGES = 24;
 const FLY_MS = 520;
+/** How much of the map is left visible outside a focused region (EXP-REQ-1). */
+const DIMMED = 0.12;
 /** Per-frame budget for layout passes, leaving the rest of the frame to draw. */
 const LAYOUT_BUDGET_MS = 7;
+
+/**
+ * A name waiting to be drawn. Labels are collected while the bubbles are
+ * drawn and written afterwards, so that no bubble can land on top of a name
+ * — and both the Galaxy's artists and the frontier around them queue up in
+ * the same list.
+ */
+interface Label {
+  name: string;
+  sx: number;
+  sy: number;
+  r: number;
+  alpha: number;
+  emphasised: boolean;
+}
 
 /* ─── Small helpers ──────────────────────────────────────────────────── */
 
@@ -96,6 +123,13 @@ const plural = (n: number, one: string, many = one + "s") =>
 function sized(url: string, size: string): string {
   return url.replace(/\/i\/u\/[^/]+\//, `/i/u/${size}/`);
 }
+
+/**
+ * Last.fm's page for an artist we know only by name — which is all we have
+ * for anything beyond the Galaxy, since it never came from a scrobble.
+ */
+export const lastFmArtistUrl = (name: string) =>
+  `https://www.last.fm/music/${encodeURIComponent(name)}`;
 
 
 
@@ -177,13 +211,22 @@ export function start(): void {
    * and the canvas are made to agree (TP-REQ-6/10/12).
    */
   function go(next: ViewState, replace = false) {
-    if (showing && sameView(next, showing) && next.period === wanted.period) {
+    const sameMap = Boolean(showing && sameView(next, showing));
+    if (sameMap && next.period === wanted.period && next.explore === wanted.explore) {
       return;
     }
     wanted = next;
     const url = toSearch(next);
     if (replace || location.search === url) history.replaceState(null, "", url);
     else history.pushState(null, "", url);
+    // Travelling between Systems changes which neighbourhood is on screen,
+    // not which Galaxy it hangs off — so the map underneath is left exactly
+    // as it was, which is the whole of `Return to Galaxy` (EXP-REQ-19).
+    if (sameMap) {
+      showing = next;
+      syncExplore(next);
+      return;
+    }
     render(next);
   }
 
@@ -192,7 +235,11 @@ export function start(): void {
     const next = parseView(location.search, defaultUser);
     if (showing && sameView(next, showing)) {
       wanted = next;
+      showing = next;
       syncControls(next);
+      // EXP-REQ-18 — Back walks the exploration route rather than rebuilding
+      // an unrelated view.
+      syncExplore(next);
       return;
     }
     wanted = next;
@@ -246,6 +293,9 @@ export function start(): void {
   function render(state: ViewState) {
     const token = ++generation;
     const stale = () => token !== generation;
+    // A different Galaxy is a different set of known artists, so whatever
+    // was being explored around the old one no longer means anything (§18).
+    closeExplorer();
     syncControls(state);
     document.title = `${state.user}'s listening map · Groove Galaxy`;
 
@@ -274,6 +324,8 @@ export function start(): void {
         built = boot(stage, canvas, veil, artists, meta, {
           playsLabel: (a) =>
             `${plural(a.plays, "play")} · ${periodInfo(meta.period).suffix}`,
+          // MVP-4 / §15 — any artist on the map is a door outward.
+          onExplore: (name) => go({ ...wanted, explore: name }),
         });
         adopt(built, state);
       },
@@ -294,6 +346,9 @@ export function start(): void {
         if (stale()) return;
         accounts.remember(state.user);
         built?.finish();
+        // A shared exploration link builds the Galaxy first, then opens the
+        // System it names on top of it (§17).
+        if (state.explore) syncExplore(state);
         announce(
           `${describeView(state)} ready. ${plural(
             built ? built.count : 0,
@@ -376,13 +431,13 @@ export function start(): void {
         }.`,
         state,
       );
-    } else if (err instanceof LastFmError && err.code === USER_NOT_FOUND) {
+    } else if (err instanceof api.LastFmError && err.code === api.USER_NOT_FOUND) {
       failed(
         "No Last.fm account by that name.",
         `Last.fm doesn't know a user called "${state.user}".`,
         state,
       );
-    } else if (err instanceof LastFmError && err.code === RATE_LIMITED) {
+    } else if (err instanceof api.LastFmError && err.code === api.RATE_LIMITED) {
       // The key is shared and read-only, so a busy spell is somebody else's
       // map rather than anything this visitor did.
       failed(
@@ -397,6 +452,78 @@ export function start(): void {
         state,
       );
     }
+  }
+
+  /* ── Exploration Mode (§8–§11) ────────────────────────────────────
+     A layer over the map rather than a replacement for it: the Galaxy
+     stays built and keeps whatever region it was focused on, so leaving a
+     System is a matter of taking the layer away again (EXP-REQ-19).      */
+
+  let explorer: Explorer | null = null;
+  let explorerToken = 0;
+
+  function closeExplorer() {
+    explorerToken++;
+    if (!explorer) return;
+    explorer.destroy();
+    explorer = null;
+    delete stage.dataset.explore;
+    current?.setDormant(false);
+  }
+
+  function originOf(view: MapView): ExploreOrigin {
+    const focused = view.clusterFocus;
+    return focused
+      ? { kind: "cluster", clusterId: focused.id, label: focused.label }
+      : { kind: "galaxy" };
+  }
+
+  function syncExplore(state: ViewState) {
+    const token = ++explorerToken;
+    if (state.mode !== "map" || !state.explore) {
+      closeExplorer();
+      return;
+    }
+    const map = current;
+    if (!map) return;
+    if (explorer) {
+      explorer.travelTo(state.explore);
+      return;
+    }
+
+    stage.dataset.explore = "true";
+    map.setDormant(true);
+    // §23 — the exploration module is fetched the first time somebody asks
+    // to explore, the same way the timeline is.
+    void import("./explorer.ts")
+      .then(({ startExplorer }) => {
+        if (token !== explorerToken || map !== current) return;
+        explorer = startExplorer({
+          stage,
+          user: state.user,
+          period: state.period,
+          origin: originOf(map),
+          anchor: state.explore!,
+          artists: map.galaxyArtists,
+          clusters: map.galaxyClusters,
+          onTravel: (name) => {
+            map.markExplored(name);
+            go({ ...wanted, explore: name });
+          },
+          onBack: () => history.back(),
+          onExit: () => go({ ...wanted, explore: null }),
+        });
+      })
+      .catch(() => {
+        if (token !== explorerToken) return;
+        // Nothing to fall back to but the map itself, which is intact.
+        delete stage.dataset.explore;
+        map.setDormant(false);
+        setCaption("Couldn't open exploration just now.");
+        announce("Couldn't open exploration just now. Still showing the map.");
+        wanted = { ...wanted, explore: null };
+        history.replaceState(null, "", toSearch(wanted));
+      });
   }
 
   // The URL is the source of truth from the very first frame, so a shared
@@ -621,6 +748,20 @@ export interface MapView {
   setStatus(text: string): void;
   /** Whichever artist the panel is open on, if any. */
   readonly selection: Artist | null;
+
+  /* ── what Exploration Mode needs from the map (EXP §5, §14) ──────── */
+
+  /** Frame and dim for one group, or `null` to show the whole Galaxy. */
+  focusCluster(id: number | null): void;
+  /** The group currently focused, if any — an exploration's origin. */
+  readonly clusterFocus: Cluster | null;
+  /** The Galaxy's artist set: what "in your Galaxy" means right now. */
+  readonly galaxyArtists: Artist[];
+  readonly galaxyClusters: Cluster[];
+  /** Hand the stage to an exploration overlay, or take it back. */
+  setDormant(on: boolean): void;
+  /** Remember that an outside artist has been visited on this trail (§3). */
+  markExplored(name: string): void;
 }
 
 export interface BootOptions {
@@ -638,6 +779,12 @@ export interface BootOptions {
   onSelect?: (a: Artist | null) => void;
   /** Timeline mode: the caller supplies coordinates, not the force layout. */
   externalPositions?: boolean;
+  /**
+   * Somebody asked to explore outward from an artist. Absent in the
+   * timeline, where exploration is deliberately out of scope (§19) — and
+   * the button simply isn't offered rather than being offered and refused.
+   */
+  onExplore?: (name: string) => void;
 }
 
 /**
@@ -681,6 +828,9 @@ function boot(
     const legendItems = $<HTMLUListElement>("legend-list");
     legendItems.replaceChildren();
     $<HTMLDivElement>("legend").hidden = true;
+    const region = $<HTMLElement>("cluster-panel");
+    region.hidden = true;
+    region.replaceChildren();
   }
   let clusters: Cluster[] = [];
   const colorOf = (a: Artist) =>
@@ -778,6 +928,28 @@ function boot(
   let hovered: Artist | null = null;
   let selected: Artist | null = null;
   let focused: Artist | null = null;
+  /** Set while an exploration overlay owns the stage. */
+  let dormant = false;
+
+  /**
+   * An artist beyond the Galaxy, drawn around the rim of a focused region.
+   *
+   * Deliberately not an `Artist` (§23): there is no play count, no radius
+   * derived from one, and no cluster — this artist never went through the
+   * Galaxy's clustering, and claiming a colour for it would say it had.
+   */
+  interface FrontierNode {
+    candidate: FrontierCandidate;
+    x: number;
+    y: number;
+    r: number;
+    image: string;
+  }
+
+  let focusCluster: Cluster | null = null;
+  let frontier: FrontierNode[] = [];
+  let hoveredFrontier: FrontierNode | null = null;
+  let selectedFrontier: FrontierNode | null = null;
   /** Non-null while the search box is narrowing things down. */
   let matches: Set<number> | null = null;
 
@@ -949,7 +1121,23 @@ function boot(
       }
     }
 
-    const labels: { a: Artist; sx: number; sy: number; r: number }[] = [];
+    // EXP-REQ-7 — at rest a focused region is not covered in lines; the
+    // links out only appear for the frontier artist being looked at.
+    const showLinks = selectedFrontier || hoveredFrontier;
+    if (showLinks && focusCluster) {
+      ctx.lineWidth = 1;
+      for (const link of showLinks.candidate.links) {
+        const member = byId.get(link.artistId);
+        if (!member) continue;
+        ctx.strokeStyle = `rgba(236, 233, 225, ${0.12 + link.match * 0.4})`;
+        ctx.beginPath();
+        ctx.moveTo(toScreenX(showLinks.x), toScreenY(showLinks.y));
+        ctx.lineTo(toScreenX(member.x), toScreenY(member.y));
+        ctx.stroke();
+      }
+    }
+
+    const labels: Label[] = [];
 
     for (const a of artists) {
       // A temporal frame the artist wasn't played in leaves them at zero
@@ -965,6 +1153,9 @@ function boot(
       const isMatch = !matches || matches.has(a.id);
       const isLinked = !highlight || linked.has(a.id);
       let alpha = own;
+      // EXP-REQ-1 — a focused region keeps its members fully visible and
+      // pushes the rest of the Galaxy well back, without moving anything.
+      if (focusCluster && a.cluster !== focusCluster.id) alpha *= DIMMED;
       if (!isMatch) alpha *= 0.14;
       else if (!isLinked) alpha *= 0.5;
 
@@ -1010,28 +1201,131 @@ function boot(
       }
 
       if (r >= LABEL_AT || emphasised || (matches && matches.has(a.id))) {
-        labels.push({ a, sx, sy, r });
+        labels.push({
+          name: a.name,
+          sx,
+          sy,
+          r,
+          alpha: clamp(alpha * 1.4, 0, 1),
+          emphasised,
+        });
       }
     }
 
+    drawFrontier(labels);
+
     ctx.textAlign = "center";
     ctx.textBaseline = "top";
-    for (const { a, sx, sy, r } of labels) {
-      const emphasised = a === selected || a === hovered || a === focused;
+    for (const { name, sx, sy, r, alpha, emphasised } of labels) {
       // A fading artist's name fades with it rather than hanging over an
       // empty patch of map.
-      ctx.globalAlpha = clamp((a.alpha ?? 1) * 1.4, 0, 1);
+      ctx.globalAlpha = alpha;
       ctx.font = `${emphasised ? 500 : 400} ${clamp(r * 0.34, 11, 15).toFixed(1)}px "IBM Plex Sans", system-ui, sans-serif`;
       ctx.lineWidth = 3;
       ctx.strokeStyle = "rgba(20, 20, 19, 0.85)";
-      ctx.strokeText(a.name, sx, sy + r + 5);
+      ctx.strokeText(name, sx, sy + r + 5);
       ctx.fillStyle = emphasised ? "#ece9e1" : "rgba(236, 233, 225, 0.72)";
-      ctx.fillText(a.name, sx, sy + r + 5);
+      ctx.fillText(name, sx, sy + r + 5);
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  /**
+   * The artists just outside the Galaxy, drawn around the rim of the region
+   * that reaches them (§7).
+   *
+   * Their visual language is deliberately *not* the map's: no group colour,
+   * a dashed halo rather than a solid rim, and a lighter weight overall.
+   * A frontier artist has not been through the Galaxy's clustering, so
+   * painting it in a cluster's colour would claim a membership it does not
+   * have — and the difference has to survive being seen in greyscale
+   * (§7, §21), which is why it is a different *shape* of ring and not a
+   * different hue.
+   */
+  function drawFrontier(labels: Label[]) {
+    if (!frontier.length) return;
+    for (const node of frontier) {
+      const r = node.r * view.scale;
+      const sx = toScreenX(node.x);
+      const sy = toScreenY(node.y);
+      if (sx + r < -60 || sx - r > width + 60) continue;
+      if (sy + r < -60 || sy - r > height + 60) continue;
+
+      const emphasised = node === selectedFrontier || node === hoveredFrontier;
+      const visited = explored.has(norm(node.candidate.name));
+      ctx.globalAlpha = emphasised ? 1 : 0.82;
+
+      const img = frontierImages.get(norm(node.candidate.name));
+      ctx.beginPath();
+      ctx.arc(sx, sy, r, 0, Math.PI * 2);
+      if (img && r >= ART_AT) {
+        ctx.save();
+        ctx.clip();
+        ctx.drawImage(img, sx - r, sy - r, r * 2, r * 2);
+        // Desaturating wash: known territory is in colour, this is not.
+        ctx.globalAlpha = (emphasised ? 1 : 0.82) * 0.45;
+        ctx.fillStyle = "#1a1a18";
+        ctx.fillRect(sx - r, sy - r, r * 2, r * 2);
+        ctx.restore();
+        ctx.globalAlpha = emphasised ? 1 : 0.82;
+      } else {
+        ctx.fillStyle = "rgba(236, 233, 225, 0.08)";
+        ctx.fill();
+      }
+
+      // The border: dashed for an artist beyond the Galaxy, closed for one
+      // that has been visited — so "explored" reads without colour too.
+      ctx.setLineDash(visited ? [] : [4, 3]);
+      ctx.lineWidth = emphasised ? 2.2 : 1.4;
+      ctx.strokeStyle = emphasised
+        ? "#ece9e1"
+        : visited
+          ? "rgba(95, 168, 119, 0.85)"
+          : "rgba(236, 233, 225, 0.55)";
+      ctx.stroke();
+      ctx.setLineDash([]);
+
+      // …plus a halo, which is what actually reads at a glance: these are
+      // outside the border of the map rather than part of it.
+      ctx.beginPath();
+      ctx.arc(sx, sy, r + 4, 0, Math.PI * 2);
+      ctx.strokeStyle = emphasised
+        ? "rgba(236, 233, 225, 0.35)"
+        : "rgba(236, 233, 225, 0.13)";
+      ctx.lineWidth = 1;
+      ctx.stroke();
+
+      labels.push({
+        name: node.candidate.name,
+        sx,
+        sy,
+        r,
+        alpha: emphasised ? 1 : 0.78,
+        emphasised,
+      });
     }
     ctx.globalAlpha = 1;
   }
 
   /* ── hit testing ────────────────────────────────────────────────── */
+
+  /** Frontier nodes sit on top: they are the reason the region is focused. */
+  function hitFrontier(sx: number, sy: number): FrontierNode | null {
+    if (!frontier.length) return null;
+    const wx = toWorldX(sx);
+    const wy = toWorldY(sy);
+    let best: FrontierNode | null = null;
+    let bestDepth = Infinity;
+    for (const node of frontier) {
+      const grab = Math.max(node.r, 10 / view.scale);
+      const d = Math.hypot(wx - node.x, wy - node.y);
+      if (d <= grab && d - node.r < bestDepth) {
+        bestDepth = d - node.r;
+        best = node;
+      }
+    }
+    return best;
+  }
 
   function hit(sx: number, sy: number): Artist | null {
     const wx = toWorldX(sx);
@@ -1170,7 +1464,11 @@ function boot(
       return;
     }
 
-    if (e.pointerType === "mouse") setHover(hit(p.x, p.y), e.clientX, e.clientY);
+    if (e.pointerType === "mouse") {
+      const node = hitFrontier(p.x, p.y);
+      if (node) setFrontierHover(node, e.clientX, e.clientY);
+      else setHover(hit(p.x, p.y), e.clientX, e.clientY);
+    }
   }, { signal });
 
   function endPointer(e: PointerEvent) {
@@ -1182,6 +1480,13 @@ function boot(
 
     // A tap, not a drag.
     if (wasPanning && movedBy < 6 && e.type === "pointerup") {
+      const node = hitFrontier(p.x, p.y);
+      if (node) {
+        // §21 — touch reaches everything a pointer does.
+        if (e.pointerType !== "mouse") setFrontierHover(node, e.clientX, e.clientY);
+        selectFrontier(node);
+        return;
+      }
       const target = hit(p.x, p.y);
       if (target) {
         if (e.pointerType !== "mouse") setHover(target, e.clientX, e.clientY);
@@ -1196,7 +1501,10 @@ function boot(
   canvas.addEventListener("pointerup", endPointer, { signal });
   canvas.addEventListener("pointercancel", endPointer, { signal });
   canvas.addEventListener("pointerleave", () => {
-    if (!panning) setHover(null);
+    if (!panning) {
+      setHover(null);
+      setFrontierHover(null);
+    }
   }, { signal });
 
   canvas.addEventListener(
@@ -1215,7 +1523,46 @@ function boot(
 
   const tip = $<HTMLDivElement>("tip");
 
+  /**
+   * The tooltip for an artist beyond the Galaxy. It never shows a play
+   * count — not appearing in this Galaxy is not evidence of zero listening
+   * (§12), so the honest thing to show is the connection that put it there.
+   */
+  function setFrontierHover(
+    node: FrontierNode | null,
+    clientX = 0,
+    clientY = 0,
+  ) {
+    if (node) setHover(null);
+    if (node !== hoveredFrontier) {
+      hoveredFrontier = node;
+      canvas.style.cursor = node ? "pointer" : "grab";
+      draw();
+    }
+    if (!node) {
+      if (!hovered) tip.hidden = true;
+      return;
+    }
+    tip.hidden = false;
+    tip.textContent = `${node.candidate.name} · beyond your Galaxy · ${plural(
+      node.candidate.supportCount,
+      "link",
+    )} into this region`;
+    positionTip(clientX, clientY);
+  }
+
+  function positionTip(clientX: number, clientY: number) {
+    const rect = stage.getBoundingClientRect();
+    const x = clamp(clientX - rect.left + 14, 8, rect.width - tip.offsetWidth - 8);
+    const y = clamp(clientY - rect.top + 16, 8, rect.height - tip.offsetHeight - 8);
+    tip.style.transform = `translate(${x}px, ${y}px)`;
+  }
+
   function setHover(a: Artist | null, clientX = 0, clientY = 0) {
+    if (a && hoveredFrontier) {
+      hoveredFrontier = null;
+      draw();
+    }
     if (a !== hovered) {
       hovered = a;
       canvas.style.cursor = a ? "pointer" : "grab";
@@ -1227,10 +1574,7 @@ function boot(
     }
     tip.hidden = false;
     tip.textContent = `${a.name} · ${playsLabel(a)}`;
-    const rect = stage.getBoundingClientRect();
-    const x = clamp(clientX - rect.left + 14, 8, rect.width - tip.offsetWidth - 8);
-    const y = clamp(clientY - rect.top + 16, 8, rect.height - tip.offsetHeight - 8);
-    tip.style.transform = `translate(${x}px, ${y}px)`;
+    positionTip(clientX, clientY);
   }
 
   /* ── detail panel (REQ-14/15/16) ────────────────────────────────── */
@@ -1245,6 +1589,7 @@ function boot(
       deselect();
       return;
     }
+    selectedFrontier = null;
     selected = a;
     // TE-REQ-16 — reading an artist stops the timeline advancing under you.
     options.onSelect?.(a);
@@ -1259,11 +1604,19 @@ function boot(
   }
 
   function deselect() {
+    if (selectedFrontier) {
+      selectedFrontier = null;
+      detail.hidden = true;
+      detail.replaceChildren();
+      delete stage.dataset.detail;
+      draw();
+    }
     if (!selected) return;
     selected = null;
     options.onSelect?.(null);
     detail.hidden = true;
     detail.replaceChildren();
+    delete stage.dataset.detail;
     syncA11y();
     draw();
     if (returnFocusTo) {
@@ -1287,6 +1640,10 @@ function boot(
   function renderDetail(a: Artist) {
     detail.replaceChildren();
     detail.hidden = false;
+    // On a phone the region panel and the artist panel want the same
+    // bottom of the same screen; the artist you just opened wins, and
+    // closing it brings the region back.
+    stage.dataset.detail = "true";
 
     const close = el("button", "detail__close", "✕");
     close.type = "button";
@@ -1357,6 +1714,16 @@ function boot(
     anchor.rel = "noopener noreferrer";
     link.append(anchor);
     body.append(link);
+
+    // §15 — exploring never requires focusing a whole region first. One
+    // artist you like is reason enough to look at what surrounds it.
+    if (options.onExplore) {
+      const explore = el("button", "detail__explore", "Explore from here →");
+      explore.type = "button";
+      explore.title = `Open the artists around ${a.name}`;
+      explore.addEventListener("click", () => options.onExplore!(a.name));
+      body.append(explore);
+    }
 
     // REQ-13/REQ-15: the positioning, explained one artist at a time.
     const nearHead = el(
@@ -1635,7 +2002,7 @@ function boot(
       e.target instanceof HTMLElement &&
       (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA");
     if (e.key === "Escape") {
-      if (selected) deselect();
+      if (selected || selectedFrontier) deselect();
       return;
     }
     if (inField || e.metaKey || e.ctrlKey || e.altKey) return;
@@ -1656,11 +2023,22 @@ function boot(
   const legendBody = $<HTMLDivElement>("legend-body");
   const legendList = $<HTMLUListElement>("legend-list");
   let legendWired = false;
+  const legendButtons = new Map<number, HTMLButtonElement>();
+
+  /** Which legend entry reads as the region currently being explored. */
+  function syncLegendState() {
+    for (const [id, btn] of legendButtons) {
+      const on = focusCluster !== null && focusCluster.id === id;
+      btn.classList.toggle("is-on", on);
+      btn.setAttribute("aria-pressed", on ? "true" : "false");
+    }
+  }
 
   function renderLegend() {
     if (!clusters.length) return;
     legend.hidden = false;
     legendList.replaceChildren();
+    legendButtons.clear();
     for (const c of clusters) {
       const li = el("li", "legend__item");
       const btn = el("button", "legend__btn");
@@ -1671,26 +2049,22 @@ function boot(
       btn.append(dot, el("span", "legend__label", c.label));
       btn.append(el("span", "legend__count", String(c.size)));
       btn.title = `${c.size} artists, anchored by ${c.anchor}`;
+      btn.setAttribute("aria-pressed", "false");
       btn.setAttribute(
         "aria-label",
-        `Highlight the ${c.label} group — ${c.size} artists, most played is ${c.anchor}`,
+        `Explore the ${c.label} region — ${c.size} artists, most played is ` +
+          `${c.anchor}. Frames this part of the map and finds the artists just beyond it.`,
       );
+      // EXP-REQ-1 — the legend is the way into a region. These are ordinary
+      // buttons, so Enter and Space do exactly what a click does.
       btn.addEventListener("click", () => {
-        const ids = artists.filter((a) => a.cluster === c.id).map((a) => a.id);
-        const already =
-          matches &&
-          ids.every((id) => matches!.has(id)) &&
-          matches!.size === ids.length;
-        matches = already ? null : new Set(ids);
-        legendList.querySelectorAll(".legend__btn").forEach((b) => {
-          b.classList.remove("is-on");
-        });
-        if (!already) btn.classList.add("is-on");
-        draw();
+        enterCluster(focusCluster && focusCluster.id === c.id ? null : c);
       });
+      legendButtons.set(c.id, btn);
       li.append(btn);
       legendList.append(li);
     }
+    syncLegendState();
 
     if (legendWired) return;
     legendWired = true;
@@ -1703,6 +2077,415 @@ function boot(
       legendToggle.setAttribute("aria-expanded", open ? "false" : "true");
       legendBody.hidden = open;
     }, { signal });
+  }
+
+  /* ── Cluster Focus and the Frontier (EXP-REQ-1…7) ───────────────── */
+
+  /**
+   * Who counts as "in the Galaxy" — the artist set currently on screen,
+   * nothing more. An artist missing from it has not been proven unheard;
+   * it is simply not part of this map (§3).
+   */
+  const galaxy = galaxyIndex(artists);
+  const clusterPanel = $<HTMLElement>("cluster-panel");
+  const totalPlays = artists.reduce((sum, a) => sum + a.plays, 0);
+  /** Outside artists visited during this exploration session (§3). */
+  const explored = new Set<string>();
+  const frontierImages = new Map<string, HTMLImageElement>();
+  /** Bumped whenever the focused region changes; stale work checks it. */
+  let frontierToken = 0;
+
+  const membersOf = (c: Cluster) => artists.filter((a) => a.cluster === c.id);
+
+  /** Where a region sits and how far it reaches, in map coordinates. */
+  function regionOf(members: Artist[]) {
+    let cx = 0;
+    let cy = 0;
+    for (const m of members) {
+      cx += m.x;
+      cy += m.y;
+    }
+    const n = members.length || 1;
+    cx /= n;
+    cy /= n;
+    let radius = 1;
+    for (const m of members) {
+      radius = Math.max(radius, Math.hypot(m.x - cx, m.y - cy) + m.r);
+    }
+    return { centre: { x: cx, y: cy }, radius };
+  }
+
+  /**
+   * Frontier bubbles are all one size, and that size means nothing.
+   * On the map a radius is a play count; an outside artist has no play
+   * count here, so giving it a size derived from anything else would be a
+   * second meaning for the same visual channel (EXP-REQ-11).
+   */
+  function frontierRadius(members: Artist[]) {
+    const sorted = members.map((m) => m.r).sort((a, b) => a - b);
+    const median = sorted[Math.floor(sorted.length / 2)] || 16;
+    return clamp(median * 0.62, 9, 26);
+  }
+
+  /**
+   * EXP-REQ-1 — focus one region: frame it, dim the rest of the Galaxy,
+   * open its panel, and go looking for what lies just beyond it. Nothing
+   * moves: these are the Galaxy's own coordinates, zoomed into
+   * (EXP-REQ-3/PRINCIPLE-4).
+   */
+  function enterCluster(c: Cluster | null) {
+    frontierToken++;
+    frontier = [];
+    hoveredFrontier = null;
+    selectedFrontier = null;
+    const changed = focusCluster !== c;
+    focusCluster = c;
+    syncLegendState();
+
+    if (!c) {
+      clusterPanel.hidden = true;
+      clusterPanel.replaceChildren();
+      draw();
+      if (changed) resetView();
+      return;
+    }
+
+    deselect();
+    const members = membersOf(c);
+    if (!members.length) return;
+    const region = regionOf(members);
+    // The visitor has said where they want to be; the map stops re-framing
+    // itself on the whole Galaxy behind their back.
+    following = false;
+    const margin = region.radius * 1.9;
+    flyTo(
+      region.centre.x,
+      region.centre.y,
+      clamp(
+        Math.min(width, height) / (margin * 2),
+        fitScale * 0.5,
+        fitScale * 12,
+      ),
+    );
+    renderClusterPanel(c, members);
+    draw();
+    announce(
+      `Focused on the ${c.label} group: ${plural(members.length, "artist")}. ` +
+        "Looking for artists just beyond it.",
+    );
+    void loadFrontier(c, members, region);
+  }
+
+  /**
+   * The region's frontier.
+   *
+   * EXP-REQ-21 — every one of these similarity lists was already fetched to
+   * build the Galaxy, so this normally costs no network at all: the shared
+   * cache answers, and what looks like a fan-out is a handful of reads.
+   */
+  async function loadFrontier(
+    c: Cluster,
+    members: Artist[],
+    region: { centre: Point; radius: number },
+  ) {
+    const token = ++frontierToken;
+    const lists = new Map<number, api.SimilarArtist[]>();
+    await Promise.all(
+      members.map(async (m) => {
+        const list = await api.similar(m.name).catch(() => []);
+        lists.set(m.id, list);
+      }),
+    );
+    if (dead || token !== frontierToken || focusCluster !== c) return;
+
+    const candidates = aggregateFrontier(members, lists, galaxy).slice(
+      0,
+      FRONTIER_LIMIT,
+    );
+    const r = frontierRadius(members);
+    const positions = placeFrontier(
+      candidates,
+      new Map(members.map((m) => [m.id, { x: m.x, y: m.y }])),
+      {
+        centre: region.centre,
+        radius: region.radius,
+        gap: r * 2.8,
+        spacing: r * 2.6,
+      },
+    );
+    frontier = candidates.map((candidate, i) => ({
+      candidate,
+      x: positions[i].x,
+      y: positions[i].y,
+      r,
+      image: "",
+    }));
+    renderClusterPanel(c, members);
+    draw();
+    announce(
+      frontier.length
+        ? `${plural(frontier.length, "artist")} found just beyond the ${c.label} group.`
+        : `No artists beyond the ${c.label} group that aren't already on this map.`,
+    );
+    void loadFrontierArt(token);
+  }
+
+  /**
+   * EXP-REQ-20 / §13 — artwork is fetched for the frontier that is actually
+   * on screen, and for nobody else. A node without a picture is a perfectly
+   * good node; the similarity is the part that carries the meaning.
+   */
+  async function loadFrontierArt(token: number) {
+    if (saveData) return;
+    await Promise.all(
+      frontier.map(async (node) => {
+        const key = norm(node.candidate.name);
+        if (frontierImages.has(key)) return;
+        const url = await api.artwork(node.candidate.name).catch(() => "");
+        if (dead || token !== frontierToken || !url) return;
+        node.image = url;
+        const img = new Image();
+        img.decoding = "async";
+        img.referrerPolicy = "no-referrer";
+        img.onload = () => {
+          if (dead || token !== frontierToken || !img.naturalWidth) return;
+          frontierImages.set(key, img);
+          draw();
+        };
+        // A missing picture is never a failure worth reporting (§22).
+        img.onerror = () => {};
+        img.src = sized(url, THUMB_PX);
+      }),
+    );
+  }
+
+  /** EXP-REQ-2 — what this region is, and what is beyond it. */
+  function renderClusterPanel(c: Cluster, members: Artist[]) {
+    clusterPanel.replaceChildren();
+    clusterPanel.hidden = false;
+
+    const close = el("button", "detail__close", "✕");
+    close.type = "button";
+    close.setAttribute("aria-label", "Leave this region and show the whole Galaxy");
+    close.addEventListener("click", () => {
+      enterCluster(null);
+      legendButtons.get(c.id)?.focus();
+    });
+
+    const head = el("p", "cluster__kicker", "Explore this region");
+    const title = el("h2", "cluster__title", c.label);
+    const swatch = el("span", "cluster__swatch");
+    swatch.style.background = c.color;
+    swatch.setAttribute("aria-hidden", "true");
+    title.prepend(swatch);
+
+    const share = totalPlays
+      ? ` · ${Math.round((c.plays / totalPlays) * 100)}% of this Galaxy`
+      : "";
+    const facts = el(
+      "p",
+      "cluster__facts",
+      `${plural(members.length, "artist")}${share}`,
+    );
+
+    const coreHead = el("p", "cluster__head", "Core artists");
+    const core = el("ul", "cluster__core");
+    for (const a of [...members].sort((x, y) => y.plays - x.plays).slice(0, 4)) {
+      const li = el("li");
+      const btn = el("button", "cluster__core-btn", a.name);
+      btn.type = "button";
+      btn.addEventListener("click", () => select(a, { fly: true }));
+      li.append(btn);
+      core.append(li);
+    }
+
+    const why = el(
+      "p",
+      "cluster__why",
+      "This group emerged from the similarity data itself — nobody sorted " +
+        "these artists into it, and its name is simply the tag most " +
+        "distinctive to whoever landed here.",
+    );
+
+    clusterPanel.append(close, head, title, facts, coreHead, core, why);
+
+    const beyondHead = el("p", "cluster__head", "Beyond this region");
+    clusterPanel.append(beyondHead);
+
+    if (!frontier.length) {
+      clusterPanel.append(
+        el(
+          "p",
+          "cluster__why",
+          frontierToken > 0 && focusCluster === c
+            ? "Looking for artists just outside your Galaxy…"
+            : "Nothing found just outside your Galaxy from here.",
+        ),
+      );
+      return;
+    }
+
+    clusterPanel.append(
+      el(
+        "p",
+        "cluster__facts",
+        `${plural(frontier.length, "nearby artist")} outside your current Galaxy`,
+      ),
+    );
+
+    // The same nodes as a list — which is what makes them keyboard
+    // reachable and touch-friendly, and where the "why is this here"
+    // answer lives in text rather than in a line on a canvas (§21).
+    const list = el("ul", "cluster__frontier");
+    for (const node of frontier) {
+      const li = el("li");
+      const btn = el("button", "frontier-item");
+      btn.type = "button";
+      btn.append(el("span", "frontier-item__name", node.candidate.name));
+      btn.append(
+        el(
+          "span",
+          "frontier-item__support",
+          `${node.candidate.supportCount} link${
+            node.candidate.supportCount === 1 ? "" : "s"
+          }`,
+        ),
+      );
+      btn.setAttribute(
+        "aria-label",
+        `${node.candidate.name}, beyond your Galaxy, connected to ` +
+          `${plural(node.candidate.supportCount, "artist")} in this region — show why`,
+      );
+      btn.addEventListener("click", () => {
+        selectFrontier(node, { fly: true });
+      });
+      li.append(btn);
+      list.append(li);
+    }
+    clusterPanel.append(list);
+  }
+
+  /** EXP-REQ-7 — the links back into the region, on demand. */
+  function selectFrontier(node: FrontierNode, { fly = false } = {}) {
+    if (selectedFrontier === node) {
+      deselect();
+      return;
+    }
+    deselect();
+    selectedFrontier = node;
+    renderFrontierDetail(node);
+    if (fly) {
+      flyTo(node.x, node.y, Math.max(view.scale, fitScale * 1.2));
+    }
+    draw();
+  }
+
+  /**
+   * §12 — what an artist beyond the Galaxy gets to say about itself.
+   *
+   * Never a play count, and never "0 plays": this map does not know what
+   * this account has listened to outside its own top artists, so the only
+   * honest claim is the one about similarity.
+   */
+  function renderFrontierDetail(node: FrontierNode) {
+    const { candidate } = node;
+    detail.replaceChildren();
+    detail.hidden = false;
+    stage.dataset.detail = "true";
+
+    const close = el("button", "detail__close", "✕");
+    close.type = "button";
+    close.setAttribute("aria-label", "Close artist details");
+    close.addEventListener("click", () => deselect());
+
+    const art = el(
+      "div",
+      "detail__art detail__art--frontier" + (node.image ? "" : " detail__art--empty"),
+    );
+    if (node.image) art.style.backgroundImage = `url("${sized(node.image, DETAIL_PX)}")`;
+    else art.textContent = "♪";
+
+    const body = el("div", "detail__body");
+    const visited = explored.has(norm(candidate.name));
+
+    const kicker = el("p", "detail__kicker detail__kicker--frontier");
+    const ring = el("span", "detail__swatch detail__swatch--frontier");
+    ring.setAttribute("aria-hidden", "true");
+    kicker.append(
+      ring,
+      document.createTextNode(
+        visited ? "Beyond your Galaxy · explored on this trail" : "Beyond your Galaxy",
+      ),
+    );
+
+    body.append(kicker, el("h2", "detail__title", candidate.name));
+    body.append(
+      el(
+        "p",
+        "detail__plays",
+        `Connected to ${plural(candidate.supportCount, "artist")} in this region`,
+      ),
+    );
+
+    const link = el("p", "detail__links");
+    const anchor = el("a", undefined, "Last.fm page ↗");
+    anchor.href = lastFmArtistUrl(candidate.name);
+    anchor.target = "_blank";
+    anchor.rel = "noopener noreferrer";
+    link.append(anchor);
+    body.append(link);
+
+    if (options.onExplore) {
+      const explore = el("button", "detail__explore", "Explore this artist →");
+      explore.type = "button";
+      explore.title = `Open the artists around ${candidate.name}`;
+      explore.addEventListener("click", () => options.onExplore!(candidate.name));
+      body.append(explore);
+    }
+
+    body.append(el("p", "detail__near-head", "Strongest links"));
+    const list = el("ul", "detail__near");
+    for (const l of candidate.links.slice(0, 5)) {
+      const other = byId.get(l.artistId);
+      if (!other) continue;
+      const li = el("li");
+      const btn = el("button", "near");
+      btn.type = "button";
+      const bar = el("span", "near__bar");
+      bar.setAttribute("aria-hidden", "true");
+      const fill = el("span", "near__fill");
+      fill.style.width = `${Math.round(clamp(l.match, 0.04, 1) * 100)}%`;
+      fill.style.background = colorOf(other);
+      bar.append(fill);
+      btn.append(
+        el("span", "near__name", other.name),
+        bar,
+        el("span", "near__score", `${Math.round(l.match * 100)}%`),
+      );
+      btn.setAttribute(
+        "aria-label",
+        `${other.name}, in your Galaxy, similarity ${Math.round(l.match * 100)} per cent — show on the map`,
+      );
+      btn.addEventListener("click", () => select(other, { fly: true }));
+      li.append(btn);
+      list.append(li);
+    }
+    body.append(list);
+    body.append(
+      el(
+        "p",
+        "detail__why",
+        "This artist is not on your map. It is here because the artists " +
+          "above it — which are — point at it in Last.fm's similarity data.",
+      ),
+    );
+
+    detail.append(close, art, body);
+    detail.scrollTop = 0;
+    announce(
+      `${candidate.name}, beyond your Galaxy, connected to ` +
+        `${plural(candidate.supportCount, "artist")} in this region.`,
+    );
   }
 
   /* ── caption + method note (REQ-3) ──────────────────────────────── */
@@ -1809,6 +2592,12 @@ function boot(
 
     setClusters(next) {
       clusters = next;
+      // The groups are the same groups — only their names improved — so a
+      // focused region stays focused rather than snapping back out.
+      if (focusCluster) {
+        focusCluster = clusters[focusCluster.id] ?? null;
+        if (focusCluster) renderClusterPanel(focusCluster, membersOf(focusCluster));
+      }
       renderLegend();
       if (selected) renderDetail(selected);
       rebuildA11yLabels();
@@ -1837,6 +2626,47 @@ function boot(
 
     get selection() {
       return selected;
+    },
+
+    /* ── exploration hooks (EXP §5, §14) ──────────────────────────── */
+
+    focusCluster(id) {
+      enterCluster(id === null ? null : (clusters[id] ?? null));
+    },
+
+    get clusterFocus() {
+      return focusCluster;
+    },
+
+    get galaxyArtists() {
+      return artists;
+    },
+
+    get galaxyClusters() {
+      return clusters;
+    },
+
+    /**
+     * An exploration overlay has the stage. The map is left exactly as it
+     * is — same region focused, same viewport — because that is what it
+     * has to be when the visitor comes back (EXP-REQ-19).
+     */
+    setDormant(on) {
+      if (dormant === on) return;
+      dormant = on;
+      if (on) {
+        setHover(null);
+        setFrontierHover(null);
+        stopAnimation();
+      } else {
+        draw();
+      }
+    },
+
+    markExplored(name) {
+      explored.add(norm(name));
+      if (selectedFrontier) renderFrontierDetail(selectedFrontier);
+      draw();
     },
 
     redraw: draw,
@@ -1901,7 +2731,13 @@ function boot(
       images.clear();
       a11yButtons.clear();
       matches = null;
+      frontier = [];
+      frontierImages.clear();
+      legendButtons.clear();
       if (owner !== mine) return; // a successor already owns the page
+      clusterPanel.hidden = true;
+      clusterPanel.replaceChildren();
+      delete stage.dataset.detail;
       a11yList.replaceChildren();
       detail.hidden = true;
       detail.replaceChildren();

@@ -53,13 +53,15 @@ src/
 │   ├── viewstate.ts       # what the URL means (account · period · year)
 │   ├── history.ts         # weekly charts → calendar frames
 │   ├── temporal.ts        # temporal universe, per-year state, derived facts
+│   ├── explore.ts         # galaxy vs frontier, systems, trails, placement
 │   └── build.ts           # orchestrates a live build, emitting as it goes
 ├── layouts/BaseLayout.astro
 ├── components/SiteHeader.astro
 ├── pages/index.astro      # the page: canvas, controls, panels, method note
 ├── scripts/
 │   ├── map.ts             # rendering, interaction, and which view is on screen
-│   └── timeline.ts        # the temporal controller (loaded only on demand)
+│   ├── timeline.ts        # the temporal controller (loaded only on demand)
+│   └── explorer.ts        # System View: travelling outward (also on demand)
 └── styles/global.css
 
 test/                      # node --test, no browser: the arithmetic and the URLs
@@ -279,6 +281,52 @@ similarity graph rather than out of a genre list, colour cannot smuggle in a
 category that wasn't derived from the data — and it carries no axis meaning,
 since it isn't a function of position.
 
+## Beyond the map
+
+The map is the territory this account has actually listened to. Last.fm's
+similarity data reaches further than that, and exploration is the part that
+crosses the border — without ever pretending the far side is part of the
+map (`docs/exploration-spec.md`).
+
+Two ways in, answering two different questions:
+
+- **A region.** Picking a group in the legend frames that part of the map and
+  dims the rest — the same coordinates, zoomed into, never a second layout.
+  Every member's similarity list is then folded together and everything
+  already on the map is removed from it, leaving the artists the region
+  points at from the outside. They are ranked by how many members of the
+  region reach them before how strongly any one of them does, so what
+  surfaces is "just beyond *this* region" rather than "one artist's
+  obsession", and each is placed out past the rim in the direction of the
+  members responsible for it.
+- **An artist.** "Explore from here" in any artist's panel opens their own
+  system: they sit at the centre, and everything around them is placed by
+  similarity *to them* — closer means more alike. Size means nothing there,
+  deliberately: on the map it means plays, and an artist beyond the map has
+  none to show.
+
+Choosing any artist re-centres on them and asks Last.fm about exactly that
+one artist, so a hop outward costs one similarity lookup and the whole thing
+can go on indefinitely without downloading a graph. Opening a region, or a
+system for an artist already on the map, usually costs nothing at all — the
+build asked those questions already and the cache still has the answers.
+
+Two things it refuses to say. It never colours an outside artist with a
+group's colour: those groups are an outcome of clustering the *map*, and
+this artist was not in it. And it never shows "0 plays" — "beyond your
+Galaxy" means "not in the artist set this map is showing", which depends on
+the period you picked, and is not evidence that anybody has never listened
+to them. The frontier's visual language is a neutral fill and a dashed rim
+rather than another hue, so the distinction survives greyscale.
+
+The trail along the top is the answer to *how do I get back*: every hop
+appends to it, every entry is clickable, Back walks it, browser Back walks
+it too, and "Return to Galaxy" restores the map — still built, still framed
+on whatever region the exploration started from. `?explore=<artist>` carries
+the current system in the URL; the trail itself lives in session history,
+and artist names rather than cluster ids are the anchors, because a name
+still means the same artist after the map is rebuilt.
+
 ## On axes
 
 There is deliberately no axis legend, and no claim anywhere in the UI that
@@ -309,6 +357,17 @@ hundred announcements. In the timeline, only artists actually played in the
 selected year are offered in the keyboard list; the rest are gone from it, as
 they are from the canvas.
 
+Exploration is keyboard-first for the same reason: legend entries are real
+buttons that frame a region on Enter, and every node that is drawn is also a
+row in a panel — the frontier around a region, and the artists around a
+system — so travelling never requires hitting a circle with a pointer. Status
+is never carried by colour alone: known territory has a solid rim, anything
+beyond the map a dashed one, somewhere already visited a second ring, and
+each row says "in your Galaxy", "beyond" or "explored" in words. Each new
+system announces itself once — "Exploring Justice. 6 related artists are in
+your Galaxy and 10 are beyond it." — and the recentring animation is skipped
+entirely when reduced motion is asked for.
+
 ## Known risk: the shared API key
 
 Going live took the key from a dozen calls per visitor to roughly 900 — one
@@ -335,6 +394,16 @@ years. It only ever happens when a visitor explicitly asks for it.)
 3. **Get a key of its own**, rather than sharing with `/music`.
 
 ## Still to do
+
+- **Searching while exploring.** In a system, the search box steps aside:
+  the map's search selects bubbles on a map that is not currently on screen.
+  Searching the loaded exploration graph — and, later, any Last.fm artist —
+  is the obvious next thing (exploration spec §16).
+
+- **Exploring a year.** Exploration runs from rolling-period maps only. The
+  timeline holds its artist universe and its geography still on purpose, so
+  "the artists around my 2018 galaxy" is a different question and deserves
+  its own design (exploration spec §19).
 
 - **Monthly resolution.** The data model already carries frame ids of the
   shape `2024-08`, the URL parser already accepts `?month=`, and
