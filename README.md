@@ -17,12 +17,14 @@ now*, this one says *what does the whole shape of my listening look like*.
 
 Two controls decide *which* listening it draws:
 
-- a **period selector** (`7D · 1M · 3M · 6M · 1Y · ALL`) rebuilds the map
-  from any of Last.fm's rolling windows, so "what have I actually been
-  playing this month" is one click from "what have I ever played";
-- **Explore over time** leaves the rolling windows behind and reconstructs
-  the account's calendar years from Last.fm's weekly charts, so the same
-  galaxy can be watched filling, emptying and refilling year by year.
+- a **period selector** (`7D · 1M · 3M · 6M · 1Y · ALL`), under a
+  `Listening period` label, rebuilds the map from any of Last.fm's rolling
+  windows, so "what have I actually been playing this month" is one click
+  from "what have I ever played";
+- **Taste over time** — a control of its own, beside the selector rather than
+  inside it — leaves the rolling windows behind and reconstructs the
+  account's calendar years from Last.fm's weekly charts, so the same galaxy
+  can be watched filling, emptying and refilling year by year.
 
 The product requirements live in [`SPEC.md`](./SPEC.md), and the temporal
 ones in [`docs/temporal-spec.md`](./docs/temporal-spec.md). This README covers
@@ -172,7 +174,7 @@ bounded nudge — never more than ~24 units from where the reference layout put
 them — rather than a fresh force simulation, because "the electronic corner
 grew" is a fact about listening and "everything moved" is not.
 
-Nothing historical is fetched until somebody presses **Explore over time**: a
+Nothing historical is fetched until somebody presses **Taste over time**: a
 decade is roughly five hundred requests, and no ordinary map load has any
 business spending that. Completed weeks are immutable, so they are cached for
 years; the week in progress gets half an hour. The second visit costs
@@ -251,9 +253,9 @@ by anyway. Stated verbatim under the map, and again in the method note
 hand*. Each group's name is whichever Last.fm tag is most distinctive to its
 members — common inside the group and comparatively rare outside it, so the
 groups don't all come out called "electronic". A group whose members share no
-tags at all is named after its most-played artist. The legend says plainly
-that this describes what landed there rather than what anything was sorted
-by.
+tags at all is named after its most-played artist. The region list says
+plainly that this describes what landed there rather than what anything was
+sorted by.
 
 **OQ-5 — Link from `/music`.** A plain outbound link, not an iframe. The map
 wants the whole viewport and its own pan/zoom gestures, both of which an
@@ -290,7 +292,7 @@ map (`docs/exploration-spec.md`).
 
 Two ways in, answering two different questions:
 
-- **A region.** Picking a group in the legend frames that part of the map and
+- **A region.** Picking a region under **Explore regions** frames that part of the map and
   dims the rest — the same coordinates, zoomed into, never a second layout.
   Every member's similarity list is then folded together and everything
   already on the map is removed from it, leaving the artists the region
@@ -327,6 +329,54 @@ the current system in the URL; the trail itself lives in session history,
 and artist names rather than cluster ids are the anchors, because a name
 still means the same artist after the map is rebuilt.
 
+## Reading it the first time
+
+Three features now share one screen — the period map, the timeline and
+exploration — and the constraint that matters most is that a visitor who has
+never seen this page should understand what they are looking at within a few
+seconds (`docs/temporal-spec.md` §54).
+
+What that buys, concretely:
+
+- **The key is never hidden.** `Size = listening · distance = similarity`
+  sits in the caption strip permanently. It is the two facts the canvas is
+  actually stating, and it is not something you have to hover, click or open
+  the method note to learn. It lives *beside* the map rather than on it: the
+  canvas gets no new always-visible controls.
+- **Controls are labelled and ranked.** The six rolling windows sit under a
+  `Listening period` label. "Taste over time" is its own control beside that
+  label, not a seventh button in the row and — importantly on a phone —
+  not inside the row's horizontal scroll, where it used to disappear past the
+  right-hand edge. Zoom and reset only reframe a map you already understand,
+  so they sit back at 55% opacity and come forward on hover or focus. An
+  action that changes the question the map answers gets the accent; a utility
+  gets an outline.
+- **Regions are doors, not a key.** What was "Groups" is **Explore regions**:
+  closed until asked for, each row carrying an arrow, and the panel leading
+  with *what pressing one does* before explaining where the names came from.
+  The map comes first; exploring it comes second.
+- **The timeline says what is different about it.** Entering it puts one
+  sentence on screen for as long as the mode lasts: *Positions stay fixed so
+  you can see how your listening changes.* Loading is the years themselves
+  ticking off — `2021 2022 2023 ✓ 2024 ✓ 2025 ✓` — rather than a count
+  crawling past a spinner, because the strip already *is* the list of years.
+- **A year's summary has a shape.** It used to be eleven equally-weighted
+  monospace lines, which is a list nobody reads. Now the year and its totals
+  are a headline; the five things that actually changed — biggest riser,
+  biggest faller, new artists, returning artists, dominant group — are cards,
+  with green for what grew and gold for what receded; the most-played artist,
+  the group's core and the partial-year caveat are small print underneath.
+- **And the map says the same thing the cards do.** When a year arrives,
+  those bubbles are briefly ringed: green opening outward for a riser or an
+  arrival, gold closing inward for a fall — including a fall to zero plays,
+  which is ringed in the place the map still keeps for that artist. A
+  handful at a time, nothing at rest, and with `prefers-reduced-motion` the
+  ring is held still instead of animated.
+
+Everything above is layout and wording. No new capability was added, on
+purpose: the interaction model gets consolidated before it gets extended
+(§55).
+
 ## On axes
 
 There is deliberately no axis legend, and no claim anywhere in the UI that
@@ -344,7 +394,7 @@ same detail panel a click would, and focus moves into the panel and back out
 again on close. The list sits *after* the search box and controls in the tab
 order, since searching by name is the faster route through three hundred
 artists. Colour is never the only carrier of meaning — every group's name is
-written out in the legend and in each artist's panel.
+written out under "Explore regions" and in each artist's panel.
 
 The period buttons and the timeline controls are ordinary buttons with a real
 pressed state; arrow keys move along the period row the way a segmented
@@ -357,7 +407,7 @@ hundred announcements. In the timeline, only artists actually played in the
 selected year are offered in the keyboard list; the rest are gone from it, as
 they are from the canvas.
 
-Exploration is keyboard-first for the same reason: legend entries are real
+Exploration is keyboard-first for the same reason: the region rows are real
 buttons that frame a region on Enter, and every node that is drawn is also a
 row in a panel — the frontier around a region, and the artists around a
 system — so travelling never requires hitting a circle with a pointer. Status
@@ -394,6 +444,12 @@ years. It only ever happens when a visitor explicitly asks for it.)
 3. **Get a key of its own**, rather than sharing with `/music`.
 
 ## Still to do
+
+Ordered on purpose: the interaction model gets consolidated before it gets
+extended. Timeline, exploration and the detail panel now share one screen —
+and one phone screen — so the next pass is comprehension and layout, not
+another capability (`docs/temporal-spec.md` §55). Everything below waits for
+that.
 
 - **Searching while exploring.** In a system, the search box steps aside:
   the map's search selects bubbles on a map that is not currently on screen.

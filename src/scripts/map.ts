@@ -76,6 +76,12 @@ const UPGRADE_AT = 34;
  */
 const MAX_CONCURRENT_IMAGES = 24;
 const FLY_MS = 520;
+/**
+ * How long a "this one changed" ring lives on a bubble when a year arrives
+ * (§54.12). Long enough to find with your eye while the sizes are still
+ * settling, short enough that the map is never decorated at rest.
+ */
+const PULSE_MS = 1500;
 /** How much of the map is left visible outside a focused region (EXP-REQ-1). */
 const DIMMED = 0.12;
 /** Per-frame budget for layout passes, leaving the rest of the frame to draw. */
@@ -96,6 +102,23 @@ interface Label {
   emphasised: boolean;
 }
 
+/**
+ * A bubble worth looking at because of what just changed about it — the
+ * timeline's five headline facts, pointed at on the map itself rather than
+ * only written under it (§54.12).
+ *
+ * Direction is the whole message, so it is carried by the two accents the
+ * rest of the page already uses — green for what grew or arrived, gold for
+ * what receded — and by whether the ring opens outward or closes inward, so
+ * it survives being seen in greyscale.
+ */
+export type PulseKind = "rise" | "fall" | "new" | "return";
+
+export interface PulseMark {
+  id: number;
+  kind: PulseKind;
+}
+
 /* ─── Small helpers ──────────────────────────────────────────────────── */
 
 const $ = <T extends HTMLElement>(id: string): T =>
@@ -105,6 +128,10 @@ const clamp = (v: number, lo: number, hi: number) =>
   v < lo ? lo : v > hi ? hi : v;
 
 const easeOut = (t: number) => 1 - Math.pow(1 - t, 3);
+
+/** Whether this visitor has asked for as little movement as possible. */
+const reducedMotion = () =>
+  window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
 /** Accent- and case-insensitive, for search matching. */
 const fold = (s: string) =>
@@ -742,6 +769,12 @@ export interface MapView {
   stopLayout(): void;
   /** Re-render the open detail panel, e.g. after moving to another year. */
   refreshDetail(): void;
+  /**
+   * Briefly ring the bubbles that just changed, and drop the rings again
+   * (§54.12). The map is never decorated at rest, so there is nothing to
+   * clear afterwards — each mark expires on its own.
+   */
+  pulse(marks: PulseMark[]): void;
   /** The sentence under the map. */
   setCaptionScope(text: string): void;
   /** The live line beside it. */
@@ -963,6 +996,11 @@ function boot(
     dirty = true;
     if (!rafId) rafId = requestAnimationFrame(frame);
   };
+
+  /** Bubble id → when its "just changed" ring started, and which kind. */
+  const pulses = new Map<number, { at: number; kind: PulseKind }>();
+  let pulseRaf = 0;
+  let pulseTimer = 0;
 
   /** The view moved, so what's worth fetching first has changed. */
   const reprioritise = () => {
@@ -1212,6 +1250,7 @@ function boot(
       }
     }
 
+    drawPulses();
     drawFrontier(labels);
 
     ctx.textAlign = "center";
@@ -1228,6 +1267,55 @@ function boot(
       ctx.fillText(name, sx, sy + r + 5);
     }
     ctx.globalAlpha = 1;
+  }
+
+  /**
+   * "This is the one that changed" — a ring that opens out of a bubble that
+   * grew or arrived, and closes into one that receded (§54.12).
+   *
+   * Drawn in its own pass rather than inside the bubble loop, so an artist
+   * who fell all the way to zero plays — nothing left to draw — is still
+   * pointed at, in the place the map has always kept for them.
+   */
+  function drawPulses() {
+    if (!pulses.size) return;
+    const now = performance.now();
+    const still = reducedMotion();
+    for (const [id, mark] of pulses) {
+      const a = byId.get(id);
+      if (!a) continue;
+      const t = clamp((now - mark.at) / PULSE_MS, 0, 1);
+      const sx = toScreenX(a.x);
+      const sy = toScreenY(a.y);
+      if (sx < -60 || sx > width + 60 || sy < -60 || sy > height + 60) continue;
+      // A vanished artist has no radius of their own to ring, so the ring
+      // falls back to a size that can still be seen.
+      const own = Math.max(a.r * view.scale, 7);
+      const grew = mark.kind !== "fall";
+      // Reduced motion gets the same ring, held still (§31): the point is
+      // *which* bubble, and that does not need movement to say.
+      const spread = still ? 0.55 : grew ? t : 1 - t;
+      const r = own + 5 + spread * 13;
+      const fade = still ? 0.85 : 1 - t;
+      ctx.globalAlpha = clamp(fade * 0.9, 0, 1);
+      ctx.strokeStyle = grew ? "#5fa877" : "#e3b23c";
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(sx, sy, r, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  function pulseStep() {
+    pulseRaf = 0;
+    if (dead) return;
+    const now = performance.now();
+    for (const [id, mark] of pulses) {
+      if (now - mark.at >= PULSE_MS) pulses.delete(id);
+    }
+    draw();
+    if (pulses.size) pulseRaf = requestAnimationFrame(pulseStep);
   }
 
   /**
@@ -2020,6 +2108,7 @@ function boot(
 
   const legend = $<HTMLDivElement>("legend");
   const legendToggle = $<HTMLButtonElement>("legend-toggle");
+  const legendTotal = $<HTMLElement>("legend-total");
   const legendBody = $<HTMLDivElement>("legend-body");
   const legendList = $<HTMLUListElement>("legend-list");
   let legendWired = false;
@@ -2037,6 +2126,13 @@ function boot(
   function renderLegend() {
     if (!clusters.length) return;
     legend.hidden = false;
+    legendTotal.textContent = String(clusters.length);
+    legendToggle.setAttribute(
+      "aria-label",
+      `Explore regions — ${plural(clusters.length, "region")} the similarity ` +
+        `data found on this map. Opens the list; picking one zooms into that ` +
+        `part of the map and finds the artists just beyond it.`,
+    );
     legendList.replaceChildren();
     legendButtons.clear();
     for (const c of clusters) {
@@ -2048,6 +2144,11 @@ function boot(
       dot.setAttribute("aria-hidden", "true");
       btn.append(dot, el("span", "legend__label", c.label));
       btn.append(el("span", "legend__count", String(c.size)));
+      // §54.6 — the arrow is the difference between a swatch you read and a
+      // row you press.
+      const go = el("span", "legend__go", "→");
+      go.setAttribute("aria-hidden", "true");
+      btn.append(go);
       btn.title = `${c.size} artists, anchored by ${c.anchor}`;
       btn.setAttribute("aria-pressed", "false");
       btn.setAttribute(
@@ -2068,10 +2169,9 @@ function boot(
 
     if (legendWired) return;
     legendWired = true;
-    if (window.matchMedia("(min-width: 60rem)").matches) {
-      legendToggle.setAttribute("aria-expanded", "true");
-      legendBody.hidden = false;
-    }
+    // §54.8 — closed on every screen size. A visitor meets the map, not a
+    // list of regions sitting on top of it; the toggle says what opening it
+    // is for.
     legendToggle.addEventListener("click", () => {
       const open = legendToggle.getAttribute("aria-expanded") === "true";
       legendToggle.setAttribute("aria-expanded", open ? "false" : "true");
@@ -2705,6 +2805,27 @@ function boot(
       rebuildA11yLabels();
     },
 
+    pulse(marks) {
+      if (dead || !marks.length) return;
+      const at = performance.now();
+      for (const mark of marks) {
+        if (byId.has(mark.id)) pulses.set(mark.id, { at, kind: mark.kind });
+      }
+      draw();
+      if (reducedMotion()) {
+        // Nothing to animate, so one timer takes the rings away again.
+        window.clearTimeout(pulseTimer);
+        pulseTimer = window.setTimeout(() => {
+          pulseTimer = 0;
+          if (dead) return;
+          pulses.clear();
+          draw();
+        }, PULSE_MS);
+      } else if (!pulseRaf) {
+        pulseRaf = requestAnimationFrame(pulseStep);
+      }
+    },
+
     setCaptionScope(text) {
       captionScope.textContent = text;
       $<HTMLElement>("about-scope").textContent = text;
@@ -2726,6 +2847,11 @@ function boot(
       stopAnimation();
       if (rafId) cancelAnimationFrame(rafId);
       rafId = 0;
+      if (pulseRaf) cancelAnimationFrame(pulseRaf);
+      pulseRaf = 0;
+      window.clearTimeout(pulseTimer);
+      pulseTimer = 0;
+      pulses.clear();
       queue = [];
       queued.clear();
       images.clear();

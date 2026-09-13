@@ -73,33 +73,48 @@ const DEFAULT_USER = "NestorDHCP";
 
         <!--
           The rolling period (TP-REQ-3): always visible, never behind a
-          settings panel, and never showing Last.fm's own names for these
-          windows (TP-REQ-2). "Explore over time" sits apart from it on
-          purpose — "12 months" and "2025" are not two options of the same
-          kind (§33).
+          settings panel, never showing Last.fm's own names for these windows
+          (TP-REQ-2), and labelled, because "3M" only reads as a period once
+          something says so (§54.1).
+
+          "Taste over time" is a separate control rather than a seventh
+          button, and it sits *outside* the scrolling row — "12 months" and
+          "2025" are not two options of the same kind (§33), and an action
+          that leaves the rolling windows behind must not be something a
+          phone hides past the right-hand edge (§54.2).
         -->
-        <div class="periods" id="periods" role="group" aria-label="Listening period">
-          {PERIODS.map((p) => (
+        <div class="timeframe">
+          <div class="timeframe__head">
+            <span class="timeframe__label" id="periods-label">Listening period</span>
             <button
               type="button"
-              class={`period${p.value === DEFAULT_PERIOD ? " is-on" : ""}`}
-              data-period={p.value}
-              aria-pressed={p.value === DEFAULT_PERIOD ? "true" : "false"}
-              title={`Rebuild the map from ${p.value === "overall" ? "the whole history" : p.phrase}`}
-            >
-              <span aria-hidden="true">{p.short}</span>
-              <span class="sr-only">{p.label}</span>
-            </button>
-          ))}
-          <button
-            type="button"
-            class="period period--timeline"
-            id="timeline-enter"
-            aria-pressed="false"
-            title="Move through this account's listening year by year"
-          >Explore over time →</button>
+              class="cta cta--timeline"
+              id="timeline-enter"
+              aria-pressed="false"
+              title="Move through this account's listening year by year"
+            >Taste over time →</button>
+          </div>
+          <div class="periods" id="periods" role="group" aria-labelledby="periods-label">
+            {PERIODS.map((p) => (
+              <button
+                type="button"
+                class={`period${p.value === DEFAULT_PERIOD ? " is-on" : ""}`}
+                data-period={p.value}
+                aria-pressed={p.value === DEFAULT_PERIOD ? "true" : "false"}
+                title={`Rebuild the map from ${p.value === "overall" ? "the whole history" : p.phrase}`}
+              >
+                <span aria-hidden="true">{p.short}</span>
+                <span class="sr-only">{p.label}</span>
+              </button>
+            ))}
+          </div>
         </div>
 
+        <!--
+          Utility, not action: framing the map is something you reach for
+          after you have understood it, so it is the quietest thing on the
+          canvas and only comes forward on hover or focus (§54.5).
+        -->
         <div class="zoom" role="group" aria-label="Zoom and view">
           <button type="button" class="zoom__btn" id="zoom-out" aria-label="Zoom out">−</button>
           <button type="button" class="zoom__btn" id="zoom-in" aria-label="Zoom in">+</button>
@@ -109,7 +124,14 @@ const DEFAULT_USER = "NestorDHCP";
         </div>
       </div>
 
-      <!-- ─── Cluster legend (auto-derived, see §method) ─── -->
+      <!--
+        The regions of the map (auto-derived, see §method) — and the way into
+        them. This is not a legend you read, it is a list you press: every
+        entry zooms into that part of the map and works out what sits just
+        outside it, so it is named for the action rather than for the colours
+        (§54.6). Closed until it is asked for: the map comes first, exploring
+        it comes second (§54.8).
+      -->
       <div class="legend" id="legend" hidden>
         <button
           type="button"
@@ -118,16 +140,20 @@ const DEFAULT_USER = "NestorDHCP";
           aria-expanded="false"
           aria-controls="legend-body"
         >
-          <span class="legend__title">Groups</span>
+          <span class="legend__title">Explore regions</span>
+          <span class="legend__count-total" id="legend-total" aria-hidden="true"></span>
           <span class="legend__chev" aria-hidden="true">▸</span>
         </button>
         <div class="legend__body" id="legend-body" hidden>
+          <p class="legend__hint">
+            Pick a region to zoom into that part of the map and see which
+            artists sit just beyond it.
+          </p>
           <p class="legend__note">
             Colours mark groups the similarity data fell into on its own. Each
             name is the tag most distinctive to that group's artists — a
             description of what landed there, not a label anything was sorted
-            by. Pick one to zoom into that region and see the artists sitting
-            just beyond it.
+            by.
           </p>
           <ul class="legend__list" id="legend-list"></ul>
         </div>
@@ -211,6 +237,15 @@ const DEFAULT_USER = "NestorDHCP";
 
     <!-- ─── Taste Evolution controls (§29) ─── -->
     <div class="timeline" id="timeline" hidden>
+      <!--
+        What is different about this mode, said once and kept there: the one
+        thing a visitor has to know to read a year is that nothing moved
+        (§54.4).
+      -->
+      <p class="timeline__note">
+        <span class="timeline__note-mark" aria-hidden="true">◎</span>
+        Positions stay fixed so you can see how your listening changes.
+      </p>
       <div class="timeline__bar">
         <div class="timeline__transport" role="group" aria-label="Move through time">
           <button type="button" class="timeline__btn" id="timeline-prev" aria-label="Previous year">◀</button>
@@ -226,6 +261,23 @@ const DEFAULT_USER = "NestorDHCP";
 
     <!-- ─── Caption strip: what you're looking at (REQ-3, REQ-25) ─── -->
     <div class="caption">
+      <!--
+        How to read the map, always on screen and never a control: a first
+        visitor should not have to open the method note, hover a bubble or
+        guess to learn what size and distance mean (§54.3). It lives in the
+        caption strip rather than on the canvas, because the canvas has
+        enough on it already (§54.7).
+      -->
+      <p class="caption__key">
+        <span class="caption__key-item">
+          <span class="caption__key-mark caption__key-mark--size" aria-hidden="true"></span>
+          Size = listening
+        </span>
+        <span class="caption__key-item">
+          <span class="caption__key-mark caption__key-mark--near" aria-hidden="true"></span>
+          Distance = similarity
+        </span>
+      </p>
       <p class="caption__scope" id="caption-scope">&nbsp;</p>
       <p class="caption__meta">
         <span id="caption-asof"></span>
@@ -338,7 +390,7 @@ const DEFAULT_USER = "NestorDHCP";
             the whole history. Bubble size is always plays inside the window
             you picked, never lifetime plays.
             <br /><br />
-            "Explore over time" is a different thing. Last.fm cannot report an
+            "Taste over time" is a different thing. Last.fm cannot report an
             arbitrary calendar year, so those years are reconstructed from its
             weekly charts: one chart per week, added up. A week that straddles
             New Year is counted whole, in whichever year contains the middle
@@ -353,9 +405,9 @@ const DEFAULT_USER = "NestorDHCP";
           <dd>
             The map is the territory this account has actually listened to.
             Last.fm's similarity data reaches past it, and exploring is how
-            you cross that border. Picking a group in the legend zooms into
-            that region and works out which artists just outside the map its
-            members point at — each one shown with the artists on the map
+            you cross that border. Picking a region under "Explore regions"
+            zooms into that part of the map and works out which artists just
+            outside the map its members point at — each one shown with the artists on the map
             responsible for it. Opening any artist's own system recentres
             everything on them: the artists closest to them in the data sit
             nearest, whether or not this account has ever played them. Each

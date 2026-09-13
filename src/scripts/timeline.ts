@@ -40,7 +40,12 @@ import {
   summarise,
   type TemporalArtist,
 } from "../lib/temporal.ts";
-import { announce, type BootOptions, type MapView } from "./map.ts";
+import {
+  announce,
+  type BootOptions,
+  type MapView,
+  type PulseMark,
+} from "./map.ts";
 import type { ViewState } from "../lib/viewstate.ts";
 
 /* ─── cadence (§30) ──────────────────────────────────────────────────── */
@@ -104,6 +109,8 @@ export async function startTimeline(host: TimelineHost): Promise<void> {
   // before any of the data does: a first request that fails must still be
   // able to take the timeline back off the screen.
   const buttons = new Map<string, HTMLButtonElement>();
+  /** Years whose weekly charts have been read and added up (§54.10). */
+  const loadedFrames = new Set<string>();
   let transition = 0;
   let playing = false;
   let timer = 0;
@@ -130,7 +137,8 @@ export async function startTimeline(host: TimelineHost): Promise<void> {
     veilSub.textContent =
       "Last.fm keeps one chart per week. They are being read back and added " +
       "up into years — the first visit is the slow one; after that they are " +
-      "kept in this browser.";
+      "kept in this browser. The years tick off in the strip below as they " +
+      "arrive.";
   }
 
   exitBtn?.addEventListener("click", () => host.onExit(), { signal });
@@ -149,8 +157,16 @@ export async function startTimeline(host: TimelineHost): Promise<void> {
         },
         onFrame(frame, loaded, total) {
           if (gone()) return;
+          // §54.10 — progress is the years themselves ticking off, not a
+          // count crawling past. The strip is already the list of years, so
+          // each one says for itself that it has been read.
+          loadedFrames.add(frame.id);
+          markFrameLoaded(frame.id);
           if (status) {
-            status.textContent = `Reading ${frame.label} — ${loaded} of ${total} years`;
+            status.textContent = `Reading the weekly charts — ${loaded} of ${total} years`;
+          }
+          if (veilText) {
+            veilText.textContent = `Reading years of weekly charts — ${loaded} of ${total}`;
           }
         },
       },
@@ -224,6 +240,9 @@ export async function startTimeline(host: TimelineHost): Promise<void> {
     y: 0,
     alpha: 1,
   }));
+
+  /** Artist name → bubble, so a summary fact can find the bubble it is about. */
+  const byName = new Map(artists.map((a) => [a.name, a]));
 
   const table = buildStates(artists, ordered);
   const scale = playScale(table, ordered);
@@ -325,7 +344,7 @@ export async function startTimeline(host: TimelineHost): Promise<void> {
       const btn = document.createElement("button");
       btn.type = "button";
       btn.className = "timeline__frame";
-      btn.textContent = id;
+      btn.append(document.createTextNode(id));
       // TE-REQ-31 — which year is showing is a fact, not a colour.
       btn.setAttribute("aria-pressed", "false");
       btn.addEventListener("click", () => {
@@ -335,7 +354,24 @@ export async function startTimeline(host: TimelineHost): Promise<void> {
       buttons.set(id, btn);
       li.append(btn);
       frameList.append(li);
+      // The strip is rendered twice — once from the raw chart list, once
+      // trimmed to the years actually listened in — so whatever had already
+      // arrived keeps its tick.
+      if (loadedFrames.has(id)) markFrameLoaded(id);
     }
+  }
+
+  /** One year, read and added up: the tick is the progress bar (§54.10). */
+  function markFrameLoaded(id: string) {
+    const btn = buttons.get(id);
+    if (!btn || btn.classList.contains("is-loaded")) return;
+    btn.classList.add("is-loaded");
+    const tick = document.createElement("span");
+    tick.className = "timeline__tick";
+    tick.textContent = "✓";
+    tick.setAttribute("aria-hidden", "true");
+    btn.append(tick);
+    btn.title = `${id} — read`;
   }
 
   function syncFrameButtons(id: string) {
@@ -439,73 +475,159 @@ export async function startTimeline(host: TimelineHost): Promise<void> {
     artists.filter((a) => (table.get(a.id)?.states.get(id)?.plays || 0) > 0)
       .length;
 
-  /* ── the frame's own summary (§38) ─────────────────────────────────── */
+  /* ── the frame's own summary (§38, ranked per §54.11) ──────────────── */
 
+  /**
+   * What actually changed, ranked.
+   *
+   * Everything in here used to be one row of small monospace lines, which
+   * meant a visitor read eleven equally-weighted facts and remembered none
+   * of them. Five of them are the year's story — who rose, who fell, who
+   * arrived, who came back, and which group held the year — so those become
+   * cards, the year and its totals become a headline above them, and the
+   * caveats stay small underneath (§54.11).
+   */
   function renderSummary(frame: TemporalFrame, previous: string | null) {
     if (!summaryEl) return;
     const stats = clusterStats(artists, clusters, table, frame.id, previous);
     const summary = summarise(frame, table, stats, previous);
     summaryEl.replaceChildren();
 
-    const line = (text: string, className = "timeline__fact") => {
-      const p = document.createElement("p");
-      p.className = className;
-      p.textContent = text;
-      summaryEl.append(p);
-    };
-
-    const head = document.createElement("p");
-    head.className = "timeline__year";
-    head.textContent = frame.label;
-    summaryEl.append(head);
+    const head = document.createElement("div");
+    head.className = "timeline__head";
+    const year = document.createElement("p");
+    year.className = "timeline__year";
+    year.textContent = frame.label;
+    head.append(year);
 
     if (summary.totalPlays === 0) {
       // §42 — an empty year is a fact about the account, not a broken frame.
-      line(`Very little listening recorded in ${frame.label}.`);
+      const none = document.createElement("p");
+      none.className = "timeline__totals";
+      none.textContent = `Very little listening recorded in ${frame.label}.`;
+      head.append(none);
+      summaryEl.append(head);
       return;
     }
 
-    line(
-      `${plural(summary.totalPlays, "mapped play")} · ${plural(
-        summary.activeArtists,
-        "active artist",
-      )}${summary.complete ? "" : " · partial"}`,
-    );
-    if (summary.topArtist) line(`Most played: ${summary.topArtist}`);
+    const totals = document.createElement("p");
+    totals.className =
+      "timeline__totals" + (summary.complete ? "" : " timeline__totals--partial");
+    totals.textContent =
+      `${plural(summary.totalPlays, "play")} · ` +
+      `${plural(summary.activeArtists, "artist")}` +
+      (summary.complete ? "" : " · partial year");
+    head.append(totals);
+    summaryEl.append(head);
+
+    /* ── the five cards ── */
+
+    const cards = document.createElement("ul");
+    cards.className = "timeline__cards";
+    const card = (
+      kind: string,
+      label: string,
+      value: string,
+      sub?: string,
+    ) => {
+      const li = document.createElement("li");
+      li.className = `timeline__card timeline__card--${kind}`;
+      const l = document.createElement("span");
+      l.className = "timeline__card-label";
+      l.textContent = label;
+      const v = document.createElement("span");
+      v.className = "timeline__card-value";
+      v.textContent = value;
+      v.title = value;
+      li.append(l, v);
+      if (sub) {
+        const sm = document.createElement("span");
+        sm.className = "timeline__card-sub";
+        sm.textContent = sub;
+        sm.title = sub;
+        li.append(sm);
+      }
+      cards.append(li);
+    };
+
     if (summary.biggestRiser) {
-      line(
-        `Biggest rise: ${summary.biggestRiser.name} (${summary.biggestRiser.from} → ${summary.biggestRiser.to})`,
+      card(
+        "rise",
+        "Biggest riser",
+        summary.biggestRiser.name,
+        `${summary.biggestRiser.from} → ${summary.biggestRiser.to} plays`,
       );
     }
     if (summary.biggestFaller) {
-      line(
-        `Biggest fall: ${summary.biggestFaller.name} (${summary.biggestFaller.from} → ${summary.biggestFaller.to})`,
+      card(
+        "fall",
+        "Biggest faller",
+        summary.biggestFaller.name,
+        `${summary.biggestFaller.from} → ${summary.biggestFaller.to} plays`,
       );
     }
     if (summary.newThisFrame.length) {
-      line(`First appears here: ${summary.newThisFrame.slice(0, 3).join(", ")}`);
+      // §39 — the weekly charts can support "first appears here", and not
+      // "never heard before", so the card says the former.
+      card(
+        "new",
+        `New in ${frame.label}`,
+        summary.newThisFrame.slice(0, 3).join(", "),
+        summary.newThisFrame.length > 3
+          ? `and ${summary.newThisFrame.length - 3} more`
+          : "first chart appearance",
+      );
     }
     if (summary.returning.length) {
-      line(`Back again: ${summary.returning.slice(0, 3).join(", ")}`);
+      card(
+        "back",
+        "Returning",
+        summary.returning.slice(0, 3).join(", "),
+        summary.returning.length > 3
+          ? `and ${summary.returning.length - 3} more`
+          : "played again after a gap",
+      );
     }
     if (summary.dominantCluster) {
       const c = summary.dominantCluster;
-      const before =
+      const share = Math.round(c.share * 100);
+      const shift =
         c.previousShare === null
-          ? ""
-          : ` (${Math.round(c.previousShare * 100)}% → ${Math.round(c.share * 100)}%)`;
-      line(
-        `Largest group: ${c.label} · ${Math.round(c.share * 100)}% of listening${before}`,
-      );
-      // §45 — the group keeps its name; only its core changes year to year.
-      if (c.core.length) line(`${frame.label} core: ${c.core.join(", ")}`, "timeline__fact timeline__fact--quiet");
+          ? `${share}% of this year's listening`
+          : `${Math.round(c.previousShare * 100)}% → ${share}% of listening`;
+      card("group", "Dominant group", c.label, shift);
+    }
+    if (cards.childElementCount) summaryEl.append(cards);
+
+    /* ── and the small print ── */
+
+    const notes = document.createElement("div");
+    notes.className = "timeline__notes";
+    const note = (text: string, quiet = false) => {
+      const p = document.createElement("p");
+      p.className = "timeline__fact" + (quiet ? " timeline__fact--quiet" : "");
+      p.textContent = text;
+      p.title = text;
+      notes.append(p);
+    };
+
+    if (summary.topArtist) note(`Most played: ${summary.topArtist}`);
+    // §45 — the group keeps its name; only its core changes year to year.
+    if (summary.dominantCluster?.core.length) {
+      note(`${frame.label} core: ${summary.dominantCluster.core.join(", ")}`, true);
     }
     if (!summary.complete) {
-      line(
+      note(
         `${plural(frame.missing, "week")} of ${frame.label} could not be read, so these totals are a floor rather than an exact count.`,
-        "timeline__fact timeline__fact--quiet",
+        true,
       );
     }
+    if (notes.childElementCount) summaryEl.append(notes);
+
+    // §54.12 — the same five facts, pointed at on the map. Only when the
+    // year actually changed under somebody: a re-render because the cluster
+    // labels improved is not a transition.
+    if (previous) view.pulse(marksFor(summary));
 
     view.setCaptionScope(
       `${state.user}'s Last.fm listening in ${frame.label}, reconstructed from ` +
@@ -517,6 +639,26 @@ export async function startTimeline(host: TimelineHost): Promise<void> {
       `${frame.label} · ${plural(summary.totalPlays, "mapped play")}` +
         (summary.complete ? "" : " · partial year"),
     );
+  }
+
+  /**
+   * Which bubbles the year's story is about (§54.12). Capped deliberately:
+   * ringing fifteen bubbles at once points at nothing.
+   */
+  function marksFor(summary: ReturnType<typeof summarise>): PulseMark[] {
+    const marks: PulseMark[] = [];
+    const seen = new Set<number>();
+    const add = (name: string | undefined, kind: PulseMark["kind"]) => {
+      const a = name ? byName.get(name) : undefined;
+      if (!a || seen.has(a.id)) return;
+      seen.add(a.id);
+      marks.push({ id: a.id, kind });
+    };
+    add(summary.biggestRiser?.name, "rise");
+    add(summary.biggestFaller?.name, "fall");
+    for (const name of summary.newThisFrame.slice(0, 3)) add(name, "new");
+    for (const name of summary.returning.slice(0, 2)) add(name, "return");
+    return marks;
   }
 
   /* ── the artist panel, in a year (§37) ─────────────────────────────── */

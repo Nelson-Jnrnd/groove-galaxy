@@ -299,6 +299,15 @@ p { margin: 0; }
   transition: color 0.15s ease, border-color 0.15s ease;
 }
 .zoom__btn--wide { font-size: 0.72rem; letter-spacing: 0.06em; }
+/* Utility, so it sits back: the Galaxy is the thing on this screen, and
+   framing it is something you reach for after you have read it (§54.5). */
+.zoom {
+  opacity: 0.55;
+  transition: opacity 0.15s ease;
+}
+.zoom:hover,
+.zoom:focus-within { opacity: 1; }
+.zoom__btn { border-color: var(--border); color: var(--text-faint); }
 .zoom__btn:hover { color: var(--text); border-color: var(--border-strong); }
 
 /* ---------- hover tip ---------- */
@@ -361,13 +370,39 @@ p { margin: 0; }
   max-height: min(19rem, 42vh);
   overflow-y: auto;
 }
+.legend__count-total {
+  font-family: var(--mono);
+  font-size: 0.68rem;
+  letter-spacing: 0.04em;
+  color: var(--text-faint);
+  margin-left: auto;
+  text-transform: none;
+}
+/* What pressing one of these does, said before the caveat about where the
+   names come from (§54.6). */
+.legend__hint {
+  font-size: 0.76rem;
+  line-height: 1.45;
+  color: var(--text-dim);
+  margin-bottom: 0.4rem;
+}
 .legend__note {
   font-size: 0.72rem;
   line-height: 1.5;
   color: var(--text-faint);
   margin-bottom: 0.55rem;
 }
-.legend__list { list-style: none; margin: 0; padding: 0; display: grid; gap: 0.1rem; }
+/* minmax(0, 1fr): without it a long region name makes the row wider than
+   the panel and the arrow ends up off the edge. */
+.legend__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 0.1rem;
+}
+.legend__item { min-width: 0; }
 .legend__btn {
   width: 100%;
   display: flex;
@@ -390,6 +425,18 @@ p { margin: 0; }
 .legend__dot { width: 0.6rem; height: 0.6rem; border-radius: 50%; flex: 0 0 auto; }
 .legend__label { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .legend__count { font-family: var(--mono); font-size: 0.68rem; color: var(--text-faint); }
+/* A legend swatch is something you read; an arrow is something you press.
+   It leans in on hover so the row reads as a way in, not a key (§54.6). */
+.legend__go {
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  color: var(--text-faint);
+  flex: 0 0 auto;
+  transition: transform 0.15s ease, color 0.15s ease;
+}
+.legend__btn:hover .legend__go,
+.legend__btn:focus-visible .legend__go { color: var(--green); transform: translateX(2px); }
+.legend__btn.is-on .legend__go { color: var(--green); }
 
 /* ---------- detail panel ---------- */
 .detail {
@@ -540,20 +587,45 @@ p { margin: 0; }
   color: var(--text-faint);
 }
 
-/* ---------- rolling period control (TP-REQ-3/4) ---------- */
+/* ---------- rolling period control (TP-REQ-3/4, §54.1/§54.2) ---------- */
+/* The labelled group: "Listening period" over the windows themselves, with
+   the way into the timeline beside the label rather than inside the row. */
+.timeframe {
+  display: grid;
+  gap: 0.25rem;
+  justify-items: stretch;
+  flex: 0 1 auto;
+  min-width: 0;
+}
+.timeframe__head {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-width: 0;
+}
+.timeframe__label {
+  font-family: var(--mono);
+  font-size: 0.62rem;
+  letter-spacing: 0.13em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  text-shadow: 0 1px 3px rgba(20, 20, 19, 0.9);
+  white-space: nowrap;
+}
+
 .periods {
   display: flex;
   align-items: center;
   gap: 0.2rem;
-  flex: 0 1 auto;
   min-width: 0;
   padding: 0.2rem;
   background: var(--bg-panel);
   border: 1px solid var(--border-strong);
   border-radius: 9px;
   backdrop-filter: blur(8px);
-  /* Six windows plus the timeline door don't fit a phone; the row scrolls
-     rather than wrapping into the map. */
+  /* Six windows don't fit a phone; the row scrolls rather than wrapping into
+     the map. Nothing that isn't one of the six lives in here, so nothing
+     important is ever past the right-hand edge (§54.2). */
   overflow-x: auto;
   scrollbar-width: none;
 }
@@ -579,16 +651,33 @@ p { margin: 0; }
   color: var(--bg);
   background: var(--gold-soft);
 }
-.period--timeline {
-  margin-left: 0.2rem;
-  padding-left: 0.6rem;
-  border-left: 1px solid var(--border-strong);
-  color: var(--green);
-  letter-spacing: 0.02em;
+/* ---------- primary actions (§54.9) ----------
+   An action that changes what kind of question the map answers outranks the
+   controls that only reframe it, so it carries the accent and the weight
+   while zoom and reset stay outlines. */
+.cta {
+  appearance: none;
+  -webkit-appearance: none;
+  flex: 0 0 auto;
+  cursor: pointer;
   white-space: nowrap;
+  padding: 0.32rem 0.6rem;
+  border-radius: 8px;
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  letter-spacing: 0.03em;
+  color: var(--green);
+  background: var(--bg-panel);
+  border: 1px solid var(--green-soft);
+  backdrop-filter: blur(8px);
+  transition: color 0.15s ease, background 0.15s ease, border-color 0.15s ease;
 }
-.period--timeline:hover { color: var(--text); }
-.period--timeline[aria-pressed="true"] { background: var(--green-soft); color: var(--bg); }
+.cta:hover { color: var(--bg); background: var(--green-soft); border-color: var(--green-soft); }
+.cta--timeline[aria-pressed="true"] {
+  color: var(--bg);
+  background: var(--green-soft);
+  border-color: var(--green-soft);
+}
 
 /* While a new period is being fetched the working map stays put and dims,
    rather than flashing to an empty canvas (§9). */
@@ -602,6 +691,20 @@ p { margin: 0; }
   background: var(--bg-soft);
   padding: 0.5rem var(--pad) 0.6rem;
 }
+/* The one sentence that makes a year readable, kept on screen for as long
+   as the mode lasts (§54.4). */
+.timeline__note {
+  display: flex;
+  align-items: baseline;
+  gap: 0.4rem;
+  margin-bottom: 0.4rem;
+  font-family: var(--mono);
+  font-size: 0.7rem;
+  letter-spacing: 0.02em;
+  color: var(--text-dim);
+}
+.timeline__note-mark { color: var(--green); flex: 0 0 auto; }
+
 .timeline__bar {
   display: flex;
   align-items: center;
@@ -655,20 +758,113 @@ p { margin: 0; }
   color: var(--text-faint);
 }
 .timeline__frame:hover:not(:disabled) { color: var(--text); background: rgba(236, 233, 225, 0.06); }
-.timeline__frame:disabled { opacity: 0.4; cursor: default; }
-.timeline__frame[aria-pressed="true"] { color: var(--bg); background: var(--green-soft); }
+.timeline__frame:disabled { cursor: default; }
+.timeline__frame[aria-pressed="true"],
+.timeline__frame[aria-pressed="true"]:hover { color: var(--bg); background: var(--green-soft); }
+/* Loading is a list of years, not a spinner: a year that has been read and
+   added up says so, and the ones still coming stay dim (§54.10). */
+.timeline__frame:disabled:not(.is-loaded) { opacity: 0.35; }
+.timeline__frame.is-loaded:disabled { opacity: 0.75; color: var(--text-dim); }
+.timeline__tick {
+  color: var(--green);
+  margin-left: 0.2rem;
+  font-size: 0.66rem;
+}
+.timeline__frame[aria-pressed="true"] .timeline__tick { color: var(--bg); }
 
 .timeline__status { margin-top: 0.35rem; }
+
+/* ---------- the year's own summary (§38, ranked per §54.11) ----------
+   Five things actually changed between one year and the next — who rose,
+   who fell, who arrived, who came back, and which group held the year —
+   so those are cards, and everything else is a line underneath them. */
 .timeline__summary {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.15rem 0.9rem;
-  margin-top: 0.3rem;
+  display: grid;
+  gap: 0.35rem;
+  margin-top: 0.4rem;
   font-family: var(--mono);
   font-size: 0.7rem;
   color: var(--text-dim);
 }
-.timeline__year { color: var(--gold); letter-spacing: 0.08em; }
+.timeline__head {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem 0.75rem;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+.timeline__year {
+  font-size: 1.15rem;
+  line-height: 1.1;
+  font-weight: 500;
+  color: var(--gold);
+  letter-spacing: 0.04em;
+  flex: 0 0 auto;
+}
+.timeline__totals { color: var(--text); font-size: 0.74rem; letter-spacing: 0.02em; }
+.timeline__totals--partial { color: var(--gold); }
+
+.timeline__cards {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  min-width: 0;
+}
+.timeline__card {
+  display: grid;
+  gap: 0.1rem;
+  flex: 1 1 8.5rem;
+  /* A year with one card to its name gets a card, not a banner. */
+  max-width: 22rem;
+  min-width: 0;
+  padding: 0.3rem 0.5rem;
+  border: 1px solid var(--border);
+  border-left: 2px solid var(--border-strong);
+  border-radius: 7px;
+  background: rgba(236, 233, 225, 0.03);
+}
+.timeline__card-label {
+  font-size: 0.6rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+.timeline__card-value {
+  font-family: var(--sans);
+  font-size: 0.82rem;
+  line-height: 1.3;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.timeline__card-sub {
+  font-size: 0.64rem;
+  color: var(--text-faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* Gold rose, green fell? No — one accent per direction, held to the two the
+   whole site uses: green for what grew and arrived, gold for what receded. */
+.timeline__card--rise { border-left-color: var(--green); }
+.timeline__card--rise .timeline__card-label { color: var(--green); }
+.timeline__card--fall { border-left-color: var(--gold-soft); }
+.timeline__card--fall .timeline__card-label { color: var(--gold); }
+.timeline__card--new { border-left-color: var(--green-soft); }
+.timeline__card--new .timeline__card-label { color: var(--green); }
+.timeline__card--back { border-left-color: rgba(95, 168, 119, 0.55); }
+.timeline__card--group { border-left-color: var(--text-dim); }
+
+.timeline__notes {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.1rem 0.9rem;
+  min-width: 0;
+}
 .timeline__fact { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
 .timeline__fact--quiet { color: var(--text-faint); }
 
@@ -692,12 +888,30 @@ p { margin: 0; }
 .detail__temporal-line { line-height: 1.5; }
 
 @media (max-width: 44rem) {
+  /* Search and zoom share the first row; the labelled period group takes a
+     row of its own underneath, with the timeline CTA beside its label so it
+     is on screen whatever the scrolling row is doing (§54.2). */
   .controls { flex-wrap: wrap; }
-  .periods { order: 3; flex: 1 1 100%; }
+  .timeframe { order: 3; flex: 1 1 100%; }
+  .timeframe__head { justify-content: space-between; }
   .timeline__bar { flex-wrap: wrap; }
-  .timeline__exit { order: -1; }
   .timeline__frames { order: 3; flex: 1 1 100%; }
   .timeline__summary { font-size: 0.66rem; }
+  .timeline__year { font-size: 1rem; }
+  /* Three panels can want this strip at once on a phone. Cards stay at two
+     across rather than collapsing into a column of eleven lines. */
+  .timeline__card { flex: 1 1 7rem; padding: 0.25rem 0.45rem; max-width: none; }
+  .timeline__card-value { font-size: 0.76rem; }
+  .timeline__note { font-size: 0.66rem; }
+  /* The timeline already costs a strip under the map. Everything the year
+     has to say stays reachable, but it scrolls inside the strip rather than
+     pushing the Galaxy off a phone. */
+  .timeline__summary { max-height: 7.5rem; overflow-y: auto; }
+  .timeline__status { font-size: 0.66rem; margin-top: 0.25rem; }
+  /* The region list is a panel on a phone, not a sidebar: its own words have
+     to fit the width it actually gets. */
+  .legend__hint { font-size: 0.72rem; }
+  .legend__note { font-size: 0.68rem; }
 }
 
 /* ---------- caption strip ---------- */
@@ -716,6 +930,12 @@ p { margin: 0; }
   letter-spacing: 0.015em;
   color: var(--text-faint);
 }
+/* The inclusion sentence gives way first: the key beside it is shorter and
+   more useful, and the full sentence is in the method note either way. */
+.caption__scope {
+  flex: 1 1 12rem;
+  min-width: 0;
+}
 .caption__meta {
   display: flex;
   align-items: center;
@@ -727,6 +947,41 @@ p { margin: 0; }
   flex-wrap: wrap;
   overflow-wrap: anywhere;
 }
+/* How to read the map, permanently. Ranked above the inclusion sentence
+   beside it, because it is the thing a first visitor needs first (§54.3). */
+.caption__key {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem 0.9rem;
+  flex-wrap: wrap;
+  flex: 0 0 auto;
+  color: var(--text-dim);
+  letter-spacing: 0.04em;
+}
+.caption__key-item { display: inline-flex; align-items: center; gap: 0.35rem; }
+/* In a System, size means nothing on purpose — an artist beyond the map has
+   no plays to show — so the key steps aside rather than claiming something
+   the view is not saying. Exploration carries its own key instead. */
+.stage[data-explore="true"] ~ .caption .caption__key { display: none; }
+.caption__key-mark { flex: 0 0 auto; }
+/* Two circles of different sizes, and two sitting close together: the same
+   two facts the canvas is stating, stated in miniature. */
+.caption__key-mark--size {
+  width: 0.9rem;
+  height: 0.55rem;
+  border-radius: 0;
+  background:
+    radial-gradient(circle 0.14rem at 0.14rem 50%, rgba(227, 178, 60, 0.85) 98%, transparent 100%),
+    radial-gradient(circle 0.26rem at 0.62rem 50%, rgba(227, 178, 60, 0.85) 98%, transparent 100%);
+}
+.caption__key-mark--near {
+  width: 0.9rem;
+  height: 0.55rem;
+  background:
+    radial-gradient(circle 0.17rem at 0.19rem 50%, rgba(95, 168, 119, 0.9) 98%, transparent 100%),
+    radial-gradient(circle 0.17rem at 0.62rem 50%, rgba(95, 168, 119, 0.9) 98%, transparent 100%);
+}
+
 .caption__link {
   appearance: none;
   -webkit-appearance: none;
@@ -792,7 +1047,14 @@ p { margin: 0; }
   }
   .legend { width: min(13rem, 55vw); }
   .controls { gap: 0.4rem; }
-  .finder { flex: 1 1 auto; }
+  /* With the timeline strip open the stage is short, and the sheet gets a
+     fraction of it: the artwork gives way first so that the name, the play
+     count and the year block are above the fold rather than behind a
+     scroll (§54). */
+  .detail__art { width: 3.25rem; height: 3.25rem; margin-bottom: 0.5rem; }
+  .stage:has(~ .timeline:not([hidden])) .detail { max-height: 78%; }
+  .finder { flex: 1 1 8rem; }
+  .cta { padding: 0.3rem 0.5rem; font-size: 0.68rem; }
   .zoom__btn { min-width: 1.95rem; height: 1.95rem; padding: 0 0.4rem; }
   /* The inclusion rule still has to be legible (REQ-3), but it must not eat
      a quarter of a phone screen — the full sentence is in the method note. */

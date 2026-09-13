@@ -284,6 +284,9 @@ A control near the period selector ("Explore over time →"), visually
 distinguished from the rolling-period control, so that "12 months" and "2025"
 never appear to be equivalent options in one selector.
 
+Shipped as **"Taste over time →"**, and moved out of the period row
+altogether rather than merely styled differently inside it — see §54.2.
+
 ### 34–36. Loading, cache and API budget
 
 Historical data loads progressively: chart list → available years → timeline
@@ -412,3 +415,79 @@ Selector: *what does my musical universe look like right now?* Taste
 Evolution: *how did this universe become what it is?* The three views should
 feel like progressively deeper ways of examining the same model rather than
 three unrelated visualization features.
+
+---
+
+## Feature C — Comprehension pass
+
+Added after Feature A and Feature B were both on screen at once. Nothing
+here is a new capability: the timeline, exploration and the artist panel all
+already worked, and were all competing to be read first. This section is
+about what a visitor understands in the first few seconds, and about which
+control is allowed to shout.
+
+### 54. First-time comprehension
+
+**54.1 — The period selector is labelled.** "3M" only reads as a period once
+something says so. The six windows sit under a `Listening period` label
+rather than floating as six unexplained tokens.
+
+**54.2 — Entering the timeline is not the seventh window.** "Taste over time"
+is a control of its own, outside the period row, and specifically outside the
+row's horizontal scroll: on a phone the windows scroll and the way into the
+timeline never disappears past the right-hand edge. §33 holds — "12 months"
+and "2025" are not two options of the same kind — and now holds visually as
+well as semantically.
+
+**54.3 — How to read the map is permanently on screen.** `Size = listening ·
+distance = similarity`, in the caption strip, always. A first visitor must
+not have to hover a bubble, open the method note or guess. It lives beside
+the map rather than on it, per 54.7.
+
+**54.4 — Temporal mode says what is different about it.** On entering the
+timeline: *Positions stay fixed so you can see how your listening changes.*
+One sentence, kept there for as long as the mode lasts, because it is the
+one fact that makes a year readable.
+
+**54.5 — Utility controls sit back.** Zoom and reset only reframe what is
+already understood, so they are the quietest chrome on the canvas and come
+forward on hover or focus.
+
+**54.6 — The region list is a list of doors.** It is named for what pressing
+one does ("Explore regions"), each row carries an arrow, and the panel says
+what will happen before it explains where the names came from. It is not a
+legend to be read.
+
+**54.7 — Nothing new is added to the canvas.** Explanations go in the strips
+around the map, never as another always-visible control on top of it.
+
+**54.8 — Progressive disclosure.** The map first, exploring it second: the
+region list is closed on every screen size until it is asked for.
+
+**54.9 — Actions outrank utilities.** A control that changes what kind of
+question the map answers carries the accent and the weight; a control that
+only reframes the answer is an outline.
+
+**54.10 — Historical loading shows the years.** The timeline strip *is* the
+list of years, so loading ticks them off (`2022 ✓ 2023 ✓ 2024 …`) rather than
+crawling a count past. Years not yet read stay dim and unavailable.
+
+**54.11 — The year's summary is ranked.** Five facts are the year's story —
+biggest riser, biggest faller, new artists, returning artists, dominant group
+— and they are cards. The year and its totals are a headline above them; the
+most-played artist, the group's core and the incomplete-year caveat are small
+print below them. Eleven equally-weighted monospace lines was not a summary.
+
+**54.12 — Changed bubbles are pointed at.** When a year arrives, the bubbles
+behind those headline facts are briefly ringed on the map: green opening
+outward for what grew or arrived, gold closing inward for what receded, and
+nothing at rest. A bubble that fell to zero plays is still ringed, in the
+place the map keeps for it. Capped at a handful — ringing fifteen bubbles
+points at nothing — and with reduced motion the same ring is simply held
+still rather than animated.
+
+### 55. Consolidation
+
+No further major feature is added until this interaction model has settled.
+Timeline, exploration and detail now coexist on a phone, and the next work is
+comprehension and layout, not capability.
