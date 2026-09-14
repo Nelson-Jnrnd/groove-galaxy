@@ -178,32 +178,26 @@ const DEFAULT_USER = "NestorDHCP";
             <!-- The period this exploration inherited (§18): which Galaxy
                  "beyond your Galaxy" is measured against. -->
             <p class="explore__period quiet" id="explore-period"></p>
+            <button
+              type="button"
+              class="explore__btn"
+              id="explore-info"
+              aria-expanded="false"
+              aria-controls="explore-detail"
+            >
+              Artist info
+            </button>
             <button type="button" class="explore__btn" id="explore-back">← Back</button>
             <button type="button" class="explore__btn explore__btn--exit" id="explore-exit">
               Return to Galaxy
             </button>
           </div>
         </div>
-        <ul class="explore__key" aria-label="What the shapes mean">
-          <li>
-            <span class="key__dot key__dot--galaxy" aria-hidden="true"></span>
-            In your Galaxy
-            <span class="key__hint">— this account has played them</span>
-          </li>
-          <li>
-            <span class="key__dot key__dot--frontier" aria-hidden="true"></span>
-            Beyond your Galaxy
-            <span class="key__hint">— not (yet) played, reached by similarity</span>
-          </li>
-          <li>
-            <span class="key__dot key__dot--explored" aria-hidden="true"></span>
-            Visited this trip
-            <span class="key__hint">— beyond your Galaxy, and already opened on this walk</span>
-          </li>
-        </ul>
         <p class="explore__status quiet" id="explore-status" role="status"></p>
       </div>
 
+      <!-- Opt-in artist detail: closed until "Artist info" is pressed, so it
+           no longer sits permanently over the canvas. -->
       <aside
         class="detail detail--explore"
         id="explore-detail"

@@ -156,20 +156,26 @@ cluster.
 
 ## 7. Frontier visual language
 
-Frontier artists must be immediately distinguishable from Galaxy artists
-without relying exclusively on colour.
+In System View there are exactly two visual categories, never colour
+alone:
 
-- Galaxy artist: existing cluster colour; existing bubble treatment; normal
-  artwork treatment.
-- Frontier artist: neutral/non-cluster visual treatment; distinct border or
-  halo; visually lighter than Galaxy members; explicit `Beyond your Galaxy`
-  status in tooltip/detail UI.
+- **Played** — this account has this artist in its current Galaxy: a
+  neutral grey fill and border, no cluster colour (cluster identity is
+  still available as text in the artist detail panel, just not recoded
+  onto the node).
+- **New** — everything else, whether never travelled to or already
+  visited earlier on this trail: a green border and a small green badge
+  fixed at the node's top right, marked with a plain cross so it still
+  reads without colour. A Frontier artist must never take on a cluster's
+  colour merely because it is similar to that cluster — cluster
+  membership belongs to the Galaxy's own clustering, which an outside
+  artist never went through.
 
-A Frontier artist must not receive the selected cluster's colour merely
-because it is similar to that cluster. Cluster membership belongs to the
-user's Galaxy graph; the outside artist has not gone through that clustering
-calculation. Visited Frontier artists may gain a second visual state
-indicating that they have been explored during the current session.
+Whether a "new" artist has already been the centre of a System earlier on
+this trail (§3's *Explored*) remains tracked internally — it still shapes
+the Trail and `deadEnd` behaviour — but it is no longer a third visual
+state; on screen it reads exactly the same as an unvisited Frontier
+artist.
 
 ## 8. Entering an Artist System
 
@@ -199,35 +205,46 @@ several Frontier positions whenever enough suitable candidates exist.
 primarily encoded through radial distance, drawn as the orbit ring a
 neighbour sits on rather than a spoke pointing at the anchor — closer
 orbits are stronger matches, farther orbits are weaker ones. An orbit ring
-carries the same status marking as the node on it (solid for the Galaxy,
-dashed beyond it, green once visited), so the ring reads correctly before
-the node on it is even in focus.
+carries the same two-colour marking as the node on it (§7): grey for the
+Galaxy, green for anything new.
 
 **EXP-REQ-10a — Angular position.** Where a neighbour sits *around* its
 orbit is driven by its leading style tag once known, so artists in the
-same style cluster together in direction rather than scattering evenly.
-Radius still belongs to similarity alone (EXP-REQ-10); angle is the one
-channel free for style to use. A neighbour without a tag yet keeps the
-even golden-angle spread and settles into its tag's position once the tag
-loads — background enrichment, same as artwork (§13).
+same style cluster together in direction rather than scattering evenly. A
+subtle wedge — a background tint behind the whole angular range a tag's
+members occupy, its name set at the outer edge — makes that grouping
+visible at a glance, like a slice of the System belonging to that style.
+Radius still belongs to similarity alone (EXP-REQ-10); angle and the wedge
+are what style gets to use. A neighbour without a tag yet keeps the even
+golden-angle spread and settles into its tag's position once the tag loads
+— background enrichment, same as artwork (§13).
+
+**EXP-REQ-10b — No overlap.** Whatever radius, angle and size a neighbour
+ends up with, it must not overlap another neighbour. Resolving an overlap
+prefers sliding both nodes sideways along their own orbit; only when that
+alone cannot separate them (two nodes stacked at nearly the same angle)
+does either drift onto a slightly different orbit. This runs again
+whenever a size or an angle changes after the System first appears.
 
 **EXP-REQ-11 — Node size.** Neighbour node size reflects the artist's
 global Last.fm listener count — how widely known they are — never the
-user's personal plays, and never as large as the anchor. Listener counts
-are background enrichment fetched the same way as artwork (§13,
-EXP-REQ-20): only for the anchor and the artists actually on screen, never
-prefetched for a merely-possible next hop. A node starts at a small
-default size and grows or shrinks into its true size once the count
-loads. The anchor is fixed larger than any neighbour can become, so it
-stays recognisably the centre of the System regardless of how famous its
-neighbours are.
+user's personal plays, and never as large as the anchor. The size range is
+wide enough that a household name and a niche act are visibly different
+sizes, not a subtle gradient. Listener counts are background enrichment
+fetched the same way as artwork (§13, EXP-REQ-20): only for the anchor and
+the artists actually on screen, never prefetched for a merely-possible
+next hop. A node starts at a small default size and grows or shrinks into
+its true size once the count loads. The anchor is fixed larger than any
+neighbour can become, so it stays recognisably the centre of the System
+regardless of how famous its neighbours are.
 
-**EXP-REQ-12 — Galaxy status.** Artists belonging to the current Galaxy must
-remain recognisable as known territory. Their cluster identity may be reused
-through colour. Frontier artists remain neutral. A small legend should
-explain: `In your Galaxy`, `Beyond your Galaxy`, `Visited this trip` — each
-with a short reason so the distinction reads at a glance rather than
-needing to be inferred.
+**EXP-REQ-12 — Galaxy status.** Artists belonging to the current Galaxy
+must remain recognisable as known territory (§7): a neutral grey. Every
+other artist reads as green, whether or not it has been explored earlier
+on this trail (§3) — that distinction is kept internally for the Trail and
+for `deadEnd`, but is not shown as a third visual state or spelled out in
+a legend; grey and green, played and new, are meant to be self-evident
+without one.
 
 ## 10. Travelling between systems
 
