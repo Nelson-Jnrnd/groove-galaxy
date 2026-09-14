@@ -9,12 +9,13 @@
  *
  * Three rules shape almost everything here:
  *
- *   1. distance from the centre means similarity to the centre, and node
- *      size means nothing at all — on the map size is a play count, and a
- *      second meaning for the same channel would be a lie (EXP-REQ-10/11);
+ *   1. distance from the centre is similarity, angle is style, and size is
+ *      how widely known an artist is — three different questions, three
+ *      different channels, never doubled up and never bigger than the
+ *      anchor itself (EXP-REQ-10/10a/11);
  *   2. an artist outside the Galaxy is drawn as being outside it, in shape
- *      as well as in colour, and never claims a cluster it was never
- *      clustered into (§7);
+ *      as well as in colour — grey for played, green for new, nothing
+ *      else — and never claims a cluster it was never clustered into (§7);
  *   3. nothing is fetched until it is travelled to. One hop outward is one
  *      similarity lookup, which is what lets this go on indefinitely
  *      without downloading the whole of Last.fm (EXP-PRINCIPLE-3,
@@ -52,16 +53,18 @@ const INNER = 150;
 const OUTER = 430;
 const ANCHOR_R = 54;
 /** Starting size, before a node's listener count has loaded. */
-const NODE_R = 26;
+const NODE_R = 20;
 /**
  * Once a node's global listener count is known, its size moves within this
  * range — popularity, this time, rather than similarity or personal plays.
  * The top of the range stays below ANCHOR_R: the artist being explored
  * stays the biggest thing on screen no matter how famous its neighbours
- * are (review — "never bigger than the star of the system").
+ * are (review — "never bigger than the star of the system"), and the range
+ * itself is wide (review — "make the differences in size bigger") so the
+ * difference between a household name and a niche act actually reads.
  */
-const NODE_R_MIN = 15;
-const NODE_R_MAX = 46;
+const NODE_R_MIN = 12;
+const NODE_R_MAX = 50;
 /** Listener counts span orders of magnitude, so size follows their log. */
 const LISTENERS_LOG_MIN = 3; // ~1,000 listeners
 const LISTENERS_LOG_MAX = 6.3; // ~2,000,000 listeners
@@ -69,6 +72,9 @@ const TRANSITION_MS = 520;
 const THUMB_PX = "64s";
 const DETAIL_PX = "174s";
 const UNCLUSTERED = "#6d6a62";
+/** The one colour "new to you" gets — a border and a small top-right badge. */
+const GREEN = "#5fa877";
+const greenA = (a: number) => `rgba(95, 168, 119, ${a})`;
 
 const $ = <T extends HTMLElement>(id: string): T | null =>
   document.getElementById(id) as T | null;
@@ -83,6 +89,16 @@ const plural = (n: number, one: string, many = one + "s") =>
 
 const reducedMotion = () =>
   window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+/** A stable colour for a tag's wedge and label — same tag, same hue, always. */
+function tagHue(tag: string): number {
+  let h = 2166136261;
+  for (let i = 0; i < tag.length; i++) {
+    h ^= tag.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return ((h >>> 0) / 4294967296) * 360;
+}
 
 function sizeForListeners(n: number): number {
   const t = clamp(
@@ -156,7 +172,12 @@ export function startExplorer(host: ExplorerHost): Explorer {
   const panel = $<HTMLElement>("explore-detail");
   const backBtn = $<HTMLButtonElement>("explore-back");
   const exitBtn = $<HTMLButtonElement>("explore-exit");
+  const infoBtn = $<HTMLButtonElement>("explore-info");
   const tip = $<HTMLDivElement>("tip");
+  // The detail panel is opt-in now (review — "remove the side page that is
+  // always showing"): closed until asked for, reachable by keyboard either
+  // way (§21) through this toggle.
+  let panelOpen = false;
 
   const life = new AbortController();
   const signal = life.signal;
@@ -215,7 +236,7 @@ export function startExplorer(host: ExplorerHost): Explorer {
     canvas.style.width = `${width}px`;
     canvas.style.height = `${height}px`;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    fitScale = Math.min(width, height) / ((OUTER + NODE_R + 40) * 2);
+    fitScale = Math.min(width, height) / ((OUTER + NODE_R_MAX + 60) * 2);
     if (!framed) {
       framed = true;
       view.cx = 0;
@@ -264,33 +285,70 @@ export function startExplorer(host: ExplorerHost): Explorer {
     });
 
     const centre = at(anchorPlaced);
+    const cx = toScreenX(centre.x);
+    const cy = toScreenY(centre.y);
+
+    // Style regions: a subtle wedge behind the System for every tag that's
+    // in it, like a slice of the sky this System's style occupies (review —
+    // "mark the grouping by tag with a background colour... like a pizza
+    // slice"). Angle alone carries this (EXP-REQ-10a); radius stays
+    // reserved for similarity.
+    const byTag = new Map<string, number[]>();
+    for (const p of placed) {
+      if (!p.node.tag) continue;
+      const q = at(p);
+      const angle = Math.atan2(q.y - centre.y, q.x - centre.x);
+      const list = byTag.get(p.node.tag);
+      if (list) list.push(angle);
+      else byTag.set(p.node.tag, [angle]);
+    }
+    const wedgeOuter = (OUTER + NODE_R_MAX + 70) * view.scale;
+    for (const [tag, angles] of byTag) {
+      let lo = angles[0];
+      let hi = angles[0];
+      for (const raw of angles) {
+        let a = raw;
+        while (a < lo - Math.PI) a += Math.PI * 2;
+        while (a > lo + Math.PI) a -= Math.PI * 2;
+        if (a < lo) lo = a;
+        if (a > hi) hi = a;
+      }
+      const pad = 0.16;
+      const start = lo - pad;
+      const end = hi + pad;
+      const hue = tagHue(tag);
+      ctx.beginPath();
+      ctx.moveTo(cx, cy);
+      ctx.arc(cx, cy, wedgeOuter, start, end);
+      ctx.closePath();
+      ctx.fillStyle = `hsla(${hue}, 50%, 60%, 0.055)`;
+      ctx.fill();
+
+      const mid = (start + end) / 2;
+      ctx.font = `400 11px "IBM Plex Sans", system-ui, sans-serif`;
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillStyle = `hsla(${hue}, 55%, 78%, 0.6)`;
+      ctx.fillText(tag, cx + Math.cos(mid) * wedgeOuter * 0.97, cy + Math.sin(mid) * wedgeOuter * 0.97);
+    }
 
     // Orbits, not spokes: distance from the anchor is still similarity to
-    // it (EXP-REQ-10), but drawn as the ring a node travels rather than a
-    // line pointing at it — a solar system, not a wheel (review — "orbit
-    // circles around the star"). The ring is marked the same way a node's
-    // own rim is: solid for the Galaxy, dashed beyond it, green once
-    // visited, so a status is readable in the orbit before the node on it
-    // is even in focus.
+    // it (EXP-REQ-10), drawn as the ring a node travels rather than a line
+    // pointing at it (review — "orbit circles around the star"). Just two
+    // colours, matching the node on the ring: grey for the Galaxy, green
+    // for anything new.
     for (const p of placed) {
       const q = at(p);
       const radius = Math.hypot(q.x - centre.x, q.y - centre.y) * view.scale;
       if (radius < 1) continue;
       const focusOn = p === hovered || p === highlighted;
       const known = p.node.status === "galaxy";
-      const visited = p.node.status === "explored";
-      const alpha =
-        (focusOn ? 0.55 : known ? 0.16 : visited ? 0.16 : 0.09) *
-        (p.fresh ? t : 1);
+      const alpha = (focusOn ? 0.55 : known ? 0.14 : 0.18) * (p.fresh ? t : 1);
       ctx.beginPath();
-      ctx.setLineDash(known || visited ? [] : [5, 4]);
-      ctx.strokeStyle = visited
-        ? `rgba(95, 168, 119, ${alpha})`
-        : `rgba(236, 233, 225, ${alpha})`;
+      ctx.strokeStyle = known ? `rgba(236, 233, 225, ${alpha})` : greenA(alpha);
       ctx.lineWidth = focusOn ? 1.6 : 1;
-      ctx.arc(toScreenX(centre.x), toScreenY(centre.y), radius, 0, Math.PI * 2);
+      ctx.arc(cx, cy, radius, 0, Math.PI * 2);
       ctx.stroke();
-      ctx.setLineDash([]);
     }
 
     for (const p of placed) drawNode(p, at(p), p.fresh ? t : 1);
@@ -309,14 +367,11 @@ export function startExplorer(host: ExplorerHost): Explorer {
     const sx = toScreenX(pos.x);
     const sy = toScreenY(pos.y);
     const emphasised = isAnchor || p === hovered || p === highlighted;
+    // §7 / §21 — only two categories now (review): grey for an artist this
+    // account has already played, green — a border and a small top-right
+    // badge, never colour alone — for anything new.
     const known = p.node.status === "galaxy";
-    const visited = p.node.status === "explored";
-    const colour =
-      known && p.node.clusterId !== undefined
-        ? (host.clusters[p.node.clusterId]?.color ?? UNCLUSTERED)
-        : known
-          ? UNCLUSTERED
-          : "rgba(236, 233, 225, 0.08)";
+    const colour = known ? UNCLUSTERED : GREEN;
 
     ctx.globalAlpha = alpha;
     const img = images.get(norm(p.node.name));
@@ -326,7 +381,7 @@ export function startExplorer(host: ExplorerHost): Explorer {
       ctx.save();
       ctx.clip();
       ctx.drawImage(img, sx - r, sy - r, r * 2, r * 2);
-      ctx.globalAlpha = alpha * (known ? 0.42 : 0.5);
+      ctx.globalAlpha = alpha * (known ? 0.42 : 0.32);
       ctx.fillStyle = known ? colour : "#1a1a18";
       ctx.fillRect(sx - r, sy - r, r * 2, r * 2);
       ctx.restore();
@@ -338,28 +393,30 @@ export function startExplorer(host: ExplorerHost): Explorer {
       ctx.globalAlpha = alpha;
     }
 
-    // §7 / §21 — status is carried by the shape of the rim as well as its
-    // colour: solid for known territory, dashed for what lies beyond it,
-    // and a doubled rim for somewhere this trail has already been.
-    ctx.setLineDash(known || visited ? [] : [4, 3]);
     ctx.lineWidth = emphasised ? 2.4 : 1.4;
-    ctx.strokeStyle = emphasised
-      ? "#ece9e1"
-      : known
-        ? colour
-        : visited
-          ? "rgba(95, 168, 119, 0.9)"
-          : "rgba(236, 233, 225, 0.55)";
+    ctx.strokeStyle = emphasised ? "#ece9e1" : colour;
     ctx.stroke();
-    ctx.setLineDash([]);
 
     if (!known) {
+      // The badge is the one thing that has to survive without colour:
+      // a plain cross reads on any screen, colourblind or not.
+      const bx = sx + r * Math.SQRT1_2;
+      const by = sy - r * Math.SQRT1_2;
+      const br = Math.max(r * 0.3, 6);
       ctx.beginPath();
-      ctx.arc(sx, sy, r + (visited ? 3 : 4), 0, Math.PI * 2);
-      ctx.strokeStyle = visited
-        ? "rgba(95, 168, 119, 0.55)"
-        : "rgba(236, 233, 225, 0.15)";
-      ctx.lineWidth = 1;
+      ctx.arc(bx, by, br, 0, Math.PI * 2);
+      ctx.fillStyle = GREEN;
+      ctx.fill();
+      ctx.lineWidth = 1.2;
+      ctx.strokeStyle = "#141413";
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(bx - br * 0.5, by);
+      ctx.lineTo(bx + br * 0.5, by);
+      ctx.moveTo(bx, by - br * 0.5);
+      ctx.lineTo(bx, by + br * 0.5);
+      ctx.lineWidth = 1.2;
+      ctx.strokeStyle = "#141413";
       ctx.stroke();
     }
 
@@ -477,11 +534,7 @@ export function startExplorer(host: ExplorerHost): Explorer {
   }
 
   const statusWord = (node: ExploreNode) =>
-    node.status === "galaxy"
-      ? "in your Galaxy"
-      : node.status === "explored"
-        ? "beyond your Galaxy · visited this trip"
-        : "beyond your Galaxy";
+    node.status === "galaxy" ? "already played" : "new to you";
 
   /* ── travelling ───────────────────────────────────────────────────── */
 
@@ -567,6 +620,7 @@ export function startExplorer(host: ExplorerHost): Explorer {
       fromY: anchorFrom ? anchorFrom.y : 0,
       fresh: false,
     };
+    resolveOverlaps();
     hovered = null;
     highlighted = null;
     stuck = deadEnd(next, previousAnchor(state)?.name ?? null);
@@ -584,12 +638,7 @@ export function startExplorer(host: ExplorerHost): Explorer {
     setStatus(
       stuck
         ? "No further strong connections found here. That is a legitimate end of the road — go back, or return to your Galaxy."
-        : `${plural(
-            next.neighbours.filter((n) => n.status === "galaxy").length,
-            "artist",
-          )} here are in your Galaxy · ${
-            next.neighbours.filter((n) => n.status !== "galaxy").length
-          } beyond it`,
+        : "",
     );
     announce(
       stuck
@@ -600,19 +649,86 @@ export function startExplorer(host: ExplorerHost): Explorer {
   }
 
   /**
-   * A node whose size or angle depends on data that just arrived. Size
-   * only needs a redraw; an angle that moves needs the same recentring
-   * transition a hop uses, run over just this one node, so it visibly
-   * settles into its slot instead of jumping there (review — "position
-   * around their own orbit could be influenced by the style").
+   * Nothing may overlap once sizes stop being uniform and angles start
+   * clustering by style (review — "make sure they don't overlap / either
+   * by moving the orbit or sliding them around their own orbit"). A node is
+   * mostly nudged sideways, along its own orbit; only when two nodes sit at
+   * almost the same angle — sliding alone cannot separate them — does it
+   * drift onto a slightly different orbit. `layoutSystem`'s own radius,
+   * which is similarity and nothing else, is never touched by this; this
+   * runs afterwards, once real per-node sizes exist, which `layoutSystem`
+   * never sees.
+   */
+  function resolveOverlaps() {
+    const margin = 6;
+    for (let pass = 0; pass < 40; pass++) {
+      let moved = false;
+      for (let i = 0; i < placed.length; i++) {
+        for (let j = i + 1; j < placed.length; j++) {
+          const a = placed[i];
+          const b = placed[j];
+          const dx = b.x - a.x;
+          const dy = b.y - a.y;
+          const dist = Math.hypot(dx, dy) || 1e-6;
+          const min = a.r + b.r + margin;
+          if (dist >= min) continue;
+          const push = (min - dist) / 2 + 0.5;
+          const ux = dx / dist;
+          const uy = dy / dist;
+          nudge(a, -ux * push, -uy * push);
+          nudge(b, ux * push, uy * push);
+          moved = true;
+        }
+      }
+      if (!moved) break;
+    }
+  }
+
+  /** Move a placed node by a vector, mostly along its orbit, a little across it. */
+  function nudge(p: Placed, vx: number, vy: number) {
+    const r = Math.hypot(p.x, p.y) || 1e-6;
+    const rx = p.x / r;
+    const ry = p.y / r;
+    const tx = -ry;
+    const ty = rx;
+    const radial = vx * rx + vy * ry;
+    const tangent = vx * tx + vy * ty;
+    p.x += tx * tangent + rx * radial * 0.4;
+    p.y += ty * tangent + ry * radial * 0.4;
+  }
+
+  const snapshot = () => placed.map((p) => ({ x: p.x, y: p.y }));
+
+  /** Resolve overlaps against a pre-change snapshot, then transition into it. */
+  function settleFrom(before: { x: number; y: number }[]) {
+    resolveOverlaps();
+    let changed = false;
+    placed.forEach((p, i) => {
+      p.fromX = before[i].x;
+      p.fromY = before[i].y;
+      if (p.x !== before[i].x || p.y !== before[i].y) changed = true;
+    });
+    if (changed) {
+      transition = reducedMotion() ? 1 : 0;
+      transitionFrom = performance.now();
+    }
+    draw();
+  }
+
+  /**
+   * A node whose size or angle depends on data that just arrived. Either
+   * can introduce a fresh overlap, so both end in the same settle pass
+   * (review — "position around their own orbit could be influenced by the
+   * style").
    */
   function applyListeners(node: ExploreNode, value: number) {
     node.listeners = value;
     if (node === anchorPlaced?.node) return; // the star's size never depends on this
     const p = placed.find((q) => q.node === node);
     if (!p) return;
+    const before = snapshot();
     p.r = sizeForListeners(value);
-    draw();
+    settleFrom(before);
   }
 
   function applyTag(node: ExploreNode, tag: string) {
@@ -620,17 +736,12 @@ export function startExplorer(host: ExplorerHost): Explorer {
     if (node === anchorPlaced?.node) return; // the star sits at the centre regardless
     const p = placed.find((q) => q.node === node);
     if (!p) return;
+    const before = snapshot();
     const angle = tagAngle(tag, node.name);
     const radius = Math.hypot(p.x, p.y) || INNER;
-    for (const q of placed) {
-      q.fromX = q.x;
-      q.fromY = q.y;
-    }
     p.x = Math.cos(angle) * radius;
     p.y = Math.sin(angle) * radius;
-    transition = reducedMotion() ? 1 : 0;
-    transitionFrom = performance.now();
-    draw();
+    settleFrom(before);
   }
 
   /**
@@ -717,7 +828,7 @@ export function startExplorer(host: ExplorerHost): Explorer {
     if (!panel || !system) return;
     const { anchor, neighbours } = system;
     panel.replaceChildren();
-    panel.hidden = false;
+    panel.hidden = !panelOpen;
 
     const known = galaxy.get(norm(anchor.name));
     const art = el(
@@ -809,22 +920,19 @@ export function startExplorer(host: ExplorerHost): Explorer {
       const list = el("ul", "detail__near");
       for (const node of neighbours) {
         const li = el("li");
-        const btn = el("button", `near near--${node.status}`);
+        const known = node.status === "galaxy";
+        const cat = known ? "played" : "new";
+        const btn = el("button", `near near--${cat}`);
         btn.type = "button";
         const bar = el("span", "near__bar");
         bar.setAttribute("aria-hidden", "true");
         const fill = el("span", "near__fill");
         fill.style.width = `${Math.round(clamp(node.match ?? 0.04, 0.04, 1) * 100)}%`;
-        fill.style.background =
-          node.status === "galaxy" && node.clusterId !== undefined
-            ? (host.clusters[node.clusterId]?.color ?? UNCLUSTERED)
-            : node.status === "explored"
-              ? "#5fa877"
-              : "rgba(236, 233, 225, 0.5)";
+        fill.style.background = known ? UNCLUSTERED : GREEN;
         bar.append(fill);
         btn.append(
           el("span", "near__name", node.name),
-          el("span", `near__badge near__badge--${node.status}`, badgeFor(node)),
+          el("span", `near__badge near__badge--${cat}`, badgeFor(node)),
           bar,
           el(
             "span",
@@ -866,8 +974,8 @@ export function startExplorer(host: ExplorerHost): Explorer {
           "p",
           "detail__why",
           "Distance from the centre is similarity to " +
-            `${anchor.name} in Last.fm's listening data. Size means nothing here — ` +
-            "on your Galaxy it means plays, and an artist beyond your Galaxy has none to show.",
+            `${anchor.name} in Last.fm's listening data — closer means more alike. ` +
+            "Size is how widely known an artist is on Last.fm, never bigger than the centre.",
         ),
       );
     }
@@ -877,11 +985,7 @@ export function startExplorer(host: ExplorerHost): Explorer {
   }
 
   const badgeFor = (node: ExploreNode) =>
-    node.status === "galaxy"
-      ? "in your Galaxy"
-      : node.status === "explored"
-        ? "visited"
-        : "beyond";
+    node.status === "galaxy" ? "played" : "new";
 
   /* ── controls ─────────────────────────────────────────────────────── */
 
@@ -892,6 +996,11 @@ export function startExplorer(host: ExplorerHost): Explorer {
     else host.onExit();
   }, { signal });
   exitBtn?.addEventListener("click", () => host.onExit(), { signal });
+  infoBtn?.addEventListener("click", () => {
+    panelOpen = !panelOpen;
+    infoBtn.setAttribute("aria-expanded", String(panelOpen));
+    if (panel) panel.hidden = !panelOpen;
+  }, { signal });
 
   window.addEventListener("keydown", (e) => {
     if (

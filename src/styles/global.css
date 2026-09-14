@@ -1166,34 +1166,6 @@ p { margin: 0; }
 .trail__step.is-here { color: var(--text); font-weight: 500; cursor: default; }
 .trail__sep, .trail__ellipsis { color: var(--text-faint); font-size: 0.8rem; flex: 0 0 auto; }
 
-.explore__key {
-  list-style: none;
-  margin: 0;
-  padding: 0.3rem 0.5rem;
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.75rem;
-  width: fit-content;
-  max-width: 100%;
-  background: var(--bg-panel);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  font-size: 0.75rem;
-  color: var(--text-dim);
-}
-.explore__key li { display: flex; align-items: center; gap: 0.35rem; }
-.key__dot { width: 0.7rem; height: 0.7rem; border-radius: 50%; flex: 0 0 auto; }
-.key__dot--galaxy { background: rgba(227, 178, 60, 0.5); border: 1px solid var(--gold); }
-.key__dot--frontier { background: none; border: 1px dashed rgba(236, 233, 225, 0.75); }
-.key__dot--explored { background: none; border: 1px solid var(--green); box-shadow: 0 0 0 2px rgba(95, 168, 119, 0.3); }
-.key__hint { color: var(--text-faint); }
-
-@media (max-width: 60rem) {
-  /* The short label already carries the status; the explanation is a
-     nice-to-have that a narrow legend can't afford the width for. */
-  .key__hint { display: none; }
-}
-
 .explore__status {
   width: fit-content;
   max-width: 100%;
@@ -1212,9 +1184,9 @@ p { margin: 0; }
   color: var(--text-faint);
   flex: 0 0 auto;
 }
-.near__badge--galaxy { color: var(--gold); }
-.near__badge--explored { color: var(--green); }
-.near--frontier, .near--explored { border-left: 2px dashed var(--border-strong); }
+.near__badge--played { color: var(--text-faint); }
+.near__badge--new { color: var(--green); }
+.near--new { border-left: 2px solid var(--green); }
 
 @media (max-width: 44rem) {
   /* On a phone the two panels would fight for the same screen, so the
