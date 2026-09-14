@@ -235,6 +235,24 @@ export async function tags(artist: string): Promise<string[]> {
 }
 
 /**
+ * Global listener count — Last.fm's own measure of how widely known an
+ * artist is, as opposed to this account's personal play count. Exploration
+ * uses it for node size (EXP §7): background enrichment, fetched only for
+ * artists actually on screen, exactly like artwork and tags below.
+ */
+export async function listeners(artist: string): Promise<number> {
+  return cached("listeners", artist, async () => {
+    const data = await call(
+      { method: "artist.getinfo", artist, autocorrect: "1" },
+      true,
+    ).catch(() => null);
+    if (!data) return 0;
+    const block = data.artist as { stats?: { listeners?: string } } | undefined;
+    return Number(block?.stats?.listeners) || 0;
+  });
+}
+
+/**
  * An artist's visual identity. Last.fm stopped serving real artist portraits
  * — every one of them is now the placeholder hash — so their most-played
  * album cover stands in. Background work: the map is fine without it.

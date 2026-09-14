@@ -32,6 +32,7 @@ import {
   galaxyIndex,
   previousAnchor,
   layoutSystem,
+  tagAngle,
   travel,
   type ExploreNode,
   type ExploreOrigin,
@@ -50,7 +51,20 @@ const INNER = 150;
 /** …and the farthest. Everything in between is similarity. */
 const OUTER = 430;
 const ANCHOR_R = 54;
+/** Starting size, before a node's listener count has loaded. */
 const NODE_R = 26;
+/**
+ * Once a node's global listener count is known, its size moves within this
+ * range — popularity, this time, rather than similarity or personal plays.
+ * The top of the range stays below ANCHOR_R: the artist being explored
+ * stays the biggest thing on screen no matter how famous its neighbours
+ * are (review — "never bigger than the star of the system").
+ */
+const NODE_R_MIN = 15;
+const NODE_R_MAX = 46;
+/** Listener counts span orders of magnitude, so size follows their log. */
+const LISTENERS_LOG_MIN = 3; // ~1,000 listeners
+const LISTENERS_LOG_MAX = 6.3; // ~2,000,000 listeners
 const TRANSITION_MS = 520;
 const THUMB_PX = "64s";
 const DETAIL_PX = "174s";
@@ -69,6 +83,15 @@ const plural = (n: number, one: string, many = one + "s") =>
 
 const reducedMotion = () =>
   window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+function sizeForListeners(n: number): number {
+  const t = clamp(
+    (Math.log10(n + 1) - LISTENERS_LOG_MIN) / (LISTENERS_LOG_MAX - LISTENERS_LOG_MIN),
+    0,
+    1,
+  );
+  return NODE_R_MIN + (NODE_R_MAX - NODE_R_MIN) * t;
+}
 
 function sized(url: string, size: string): string {
   return url.replace(/\/i\/u\/[^/]+\//, `/i/u/${size}/`);
@@ -242,32 +265,32 @@ export function startExplorer(host: ExplorerHost): Explorer {
 
     const centre = at(anchorPlaced);
 
-    // Spokes: the similarity this whole picture is made of. Weight follows
-    // the match, so the strong ties read as strong ties.
+    // Orbits, not spokes: distance from the anchor is still similarity to
+    // it (EXP-REQ-10), but drawn as the ring a node travels rather than a
+    // line pointing at it — a solar system, not a wheel (review — "orbit
+    // circles around the star"). The ring is marked the same way a node's
+    // own rim is: solid for the Galaxy, dashed beyond it, green once
+    // visited, so a status is readable in the orbit before the node on it
+    // is even in focus.
     for (const p of placed) {
       const q = at(p);
-      const match = p.node.match ?? 0;
+      const radius = Math.hypot(q.x - centre.x, q.y - centre.y) * view.scale;
+      if (radius < 1) continue;
       const focusOn = p === hovered || p === highlighted;
-      ctx.strokeStyle = `rgba(236, 233, 225, ${
-        (focusOn ? 0.5 : 0.1 + match * 0.3) * (p.fresh ? t : 1)
-      })`;
-      ctx.lineWidth = focusOn ? 1.8 : 1;
-      // Stop the spoke at each node's rim rather than running under it:
-      // an outside node is deliberately barely filled, and a line crossing
-      // it reads as a mark on the artist rather than a link to them.
-      const ax = toScreenX(centre.x);
-      const ay = toScreenY(centre.y);
-      const bx = toScreenX(q.x);
-      const by = toScreenY(q.y);
-      const len = Math.hypot(bx - ax, by - ay) || 1;
-      const ux = (bx - ax) / len;
-      const uy = (by - ay) / len;
-      const from = Math.min(anchorPlaced.r * view.scale, len * 0.45);
-      const to = Math.min(p.r * view.scale, len * 0.45);
+      const known = p.node.status === "galaxy";
+      const visited = p.node.status === "explored";
+      const alpha =
+        (focusOn ? 0.55 : known ? 0.16 : visited ? 0.16 : 0.09) *
+        (p.fresh ? t : 1);
       ctx.beginPath();
-      ctx.moveTo(ax + ux * from, ay + uy * from);
-      ctx.lineTo(bx - ux * to, by - uy * to);
+      ctx.setLineDash(known || visited ? [] : [5, 4]);
+      ctx.strokeStyle = visited
+        ? `rgba(95, 168, 119, ${alpha})`
+        : `rgba(236, 233, 225, ${alpha})`;
+      ctx.lineWidth = focusOn ? 1.6 : 1;
+      ctx.arc(toScreenX(centre.x), toScreenY(centre.y), radius, 0, Math.PI * 2);
       ctx.stroke();
+      ctx.setLineDash([]);
     }
 
     for (const p of placed) drawNode(p, at(p), p.fresh ? t : 1);
@@ -457,7 +480,7 @@ export function startExplorer(host: ExplorerHost): Explorer {
     node.status === "galaxy"
       ? "in your Galaxy"
       : node.status === "explored"
-        ? "beyond your Galaxy · explored"
+        ? "beyond your Galaxy · visited this trip"
         : "beyond your Galaxy";
 
   /* ── travelling ───────────────────────────────────────────────────── */
@@ -573,33 +596,84 @@ export function startExplorer(host: ExplorerHost): Explorer {
         ? `Exploring ${next.anchor.name}. No further strong connections found here.`
         : describeSystem(next),
     );
-    void loadArt(hop, next);
+    void loadEnrichment(hop, next);
   }
 
   /**
-   * §13 / EXP-REQ-20 — artwork is background enrichment for the artists
-   * actually on screen. Nothing is prefetched for artists that merely
-   * *might* be travelled to next.
+   * A node whose size or angle depends on data that just arrived. Size
+   * only needs a redraw; an angle that moves needs the same recentring
+   * transition a hop uses, run over just this one node, so it visibly
+   * settles into its slot instead of jumping there (review — "position
+   * around their own orbit could be influenced by the style").
    */
-  async function loadArt(token: number, next: System) {
+  function applyListeners(node: ExploreNode, value: number) {
+    node.listeners = value;
+    if (node === anchorPlaced?.node) return; // the star's size never depends on this
+    const p = placed.find((q) => q.node === node);
+    if (!p) return;
+    p.r = sizeForListeners(value);
+    draw();
+  }
+
+  function applyTag(node: ExploreNode, tag: string) {
+    node.tag = tag;
+    if (node === anchorPlaced?.node) return; // the star sits at the centre regardless
+    const p = placed.find((q) => q.node === node);
+    if (!p) return;
+    const angle = tagAngle(tag, node.name);
+    const radius = Math.hypot(p.x, p.y) || INNER;
+    for (const q of placed) {
+      q.fromX = q.x;
+      q.fromY = q.y;
+    }
+    p.x = Math.cos(angle) * radius;
+    p.y = Math.sin(angle) * radius;
+    transition = reducedMotion() ? 1 : 0;
+    transitionFrom = performance.now();
+    draw();
+  }
+
+  /**
+   * §13 / EXP-REQ-20 — artwork, popularity and style are all background
+   * enrichment for the artists actually on screen: the System is already
+   * complete and readable without any of it. Nothing is prefetched for
+   * artists that merely *might* be travelled to next.
+   */
+  async function loadEnrichment(token: number, next: System) {
     if (saveData) return;
     const wanted = [next.anchor, ...next.neighbours];
     await Promise.all(
       wanted.map(async (node) => {
         const key = norm(node.name);
-        if (images.has(key)) return;
-        const url = node.image || (await api.artwork(node.name).catch(() => ""));
-        if (dead || token !== hop || !url) return;
-        const img = new Image();
-        img.decoding = "async";
-        img.referrerPolicy = "no-referrer";
-        img.onload = () => {
-          if (dead || !img.naturalWidth) return;
-          images.set(key, img);
-          draw();
-        };
-        img.onerror = () => {};
-        img.src = sized(url, node === next.anchor ? DETAIL_PX : THUMB_PX);
+        await Promise.all([
+          (async () => {
+            if (images.has(key)) return;
+            const url = node.image || (await api.artwork(node.name).catch(() => ""));
+            if (dead || token !== hop || !url) return;
+            const img = new Image();
+            img.decoding = "async";
+            img.referrerPolicy = "no-referrer";
+            img.onload = () => {
+              if (dead || !img.naturalWidth) return;
+              images.set(key, img);
+              draw();
+            };
+            img.onerror = () => {};
+            img.src = sized(url, node === next.anchor ? DETAIL_PX : THUMB_PX);
+          })(),
+          (async () => {
+            if (node.listeners !== undefined) return;
+            const value = await api.listeners(node.name).catch(() => 0);
+            if (dead || token !== hop) return;
+            applyListeners(node, value);
+          })(),
+          (async () => {
+            if (node.tag) return;
+            const found = await api.tags(node.name).catch(() => []);
+            if (dead || token !== hop || !found.length) return;
+            applyTag(node, found[0]);
+          })(),
+        ]);
       }),
     );
   }
@@ -806,7 +880,7 @@ export function startExplorer(host: ExplorerHost): Explorer {
     node.status === "galaxy"
       ? "in your Galaxy"
       : node.status === "explored"
-        ? "explored"
+        ? "visited"
         : "beyond";
 
   /* ── controls ─────────────────────────────────────────────────────── */

@@ -28,6 +28,8 @@ export const TTL = {
   similar: 30 * 24 * 3600e3,
   /** Tags drift slowly and only decide a group's name. */
   tags: 30 * 24 * 3600e3,
+  /** Global listener counts move slowly; only exploration's node size needs them. */
+  listeners: 30 * 24 * 3600e3,
   /** An artist's cover art changes about as often as their discography. */
   art: 30 * 24 * 3600e3,
   /** Play counts are the whole point of the map being current. */
@@ -95,6 +97,7 @@ const KEEP: Record<Kind, number> = {
   /** Enrichment: a map is perfectly usable without it. */
   art: 3,
   tags: 4,
+  listeners: 3,
   /** Fifty-two charts, already added up. */
   frame: 5,
   /** The expensive one, and the same answer for every account. */

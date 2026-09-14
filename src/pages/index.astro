@@ -185,9 +185,21 @@ const DEFAULT_USER = "NestorDHCP";
           </div>
         </div>
         <ul class="explore__key" aria-label="What the shapes mean">
-          <li><span class="key__dot key__dot--galaxy" aria-hidden="true"></span>In your Galaxy</li>
-          <li><span class="key__dot key__dot--frontier" aria-hidden="true"></span>Beyond your Galaxy</li>
-          <li><span class="key__dot key__dot--explored" aria-hidden="true"></span>Already explored</li>
+          <li>
+            <span class="key__dot key__dot--galaxy" aria-hidden="true"></span>
+            In your Galaxy
+            <span class="key__hint">— this account has played them</span>
+          </li>
+          <li>
+            <span class="key__dot key__dot--frontier" aria-hidden="true"></span>
+            Beyond your Galaxy
+            <span class="key__hint">— not (yet) played, reached by similarity</span>
+          </li>
+          <li>
+            <span class="key__dot key__dot--explored" aria-hidden="true"></span>
+            Visited this trip
+            <span class="key__hint">— beyond your Galaxy, and already opened on this walk</span>
+          </li>
         </ul>
         <p class="explore__status quiet" id="explore-status" role="status"></p>
       </div>

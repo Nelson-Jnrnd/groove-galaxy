@@ -1186,6 +1186,13 @@ p { margin: 0; }
 .key__dot--galaxy { background: rgba(227, 178, 60, 0.5); border: 1px solid var(--gold); }
 .key__dot--frontier { background: none; border: 1px dashed rgba(236, 233, 225, 0.75); }
 .key__dot--explored { background: none; border: 1px solid var(--green); box-shadow: 0 0 0 2px rgba(95, 168, 119, 0.3); }
+.key__hint { color: var(--text-faint); }
+
+@media (max-width: 60rem) {
+  /* The short label already carries the status; the explanation is a
+     nice-to-have that a narrow legend can't afford the width for. */
+  .key__hint { display: none; }
+}
 
 .explore__status {
   width: fit-content;
