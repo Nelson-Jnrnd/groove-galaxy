@@ -13,18 +13,21 @@ import type { Artist } from "../src/lib/build.ts";
 import type { SimilarArtist } from "../src/lib/lastfm.ts";
 import {
   aggregateFrontier,
+  allocateTagArcs,
   back,
   deadEnd,
   beginExploration,
   buildSystem,
-  collapseTrail,
   currentAnchor,
   describeSystem,
   galaxyIndex,
   layoutSystem,
   placeFrontier,
   previousAnchor,
+  tagAngle,
   travel,
+  UNTAGGED,
+  type ExploreNode,
   type ExploreState,
 } from "../src/lib/explore.ts";
 
@@ -397,21 +400,6 @@ test("Back walks the route rather than logging it", () => {
   assert.ok(returned.explored.has("gesaffelstein"));
 });
 
-test("a long trail collapses in the middle, keeping both ends (EXP-REQ-16)", () => {
-  const trail = ["A", "B", "C", "D", "E"].map((n) => entry(n));
-  assert.deepEqual(collapseTrail(trail, 3).map((e) => e && e.name), [
-    "A",
-    null,
-    "D",
-    "E",
-  ]);
-  assert.deepEqual(
-    collapseTrail(trail.slice(0, 2), 3).map((e) => e && e.name),
-    ["A", "B"],
-    "a short trail is left alone",
-  );
-});
-
 /* ─── placement (EXP-REQ-6/10) ───────────────────────────────────────── */
 
 test("a frontier artist appears beyond the part of the region that reaches it", () => {
@@ -505,4 +493,109 @@ test("the artist travelled from sits at the edge rather than on the anchor", () 
   const unscored = system.neighbours.findIndex((n) => n.match === undefined);
   assert.ok(unscored >= 0);
   assert.ok(Math.hypot(points[unscored].x, points[unscored].y) >= 100);
+});
+
+/* ─── style arcs (EXP-REQ-10a) ───────────────────────────────────────── */
+
+test("allocateTagArcs splits the whole circle, proportionally to each tag's count", () => {
+  const counts = new Map([
+    ["rock", 2],
+    ["electronic", 6],
+    ["jazz", 2],
+  ]);
+  const arcs = allocateTagArcs(counts, null);
+  assert.equal(arcs.length, 3);
+  const total = arcs.reduce((sum, a) => sum + (a.end - a.start), 0);
+  assert.ok(Math.abs(total - Math.PI * 2) < 1e-9, "covers the full circle exactly once");
+
+  const electronic = arcs.find((a) => a.tag === "electronic")!;
+  const rock = arcs.find((a) => a.tag === "rock")!;
+  const ratio = (electronic.end - electronic.start) / (rock.end - rock.start);
+  assert.ok(Math.abs(ratio - 3) < 1e-9, "three times the members, three times the arc");
+});
+
+test("an untagged bucket gets its own slice like any other tag", () => {
+  const counts = new Map([
+    ["rock", 2],
+    [UNTAGGED, 2],
+  ]);
+  const arcs = allocateTagArcs(counts, null);
+  assert.equal(arcs.length, 2);
+  assert.ok(arcs.some((a) => a.tag === UNTAGGED));
+});
+
+test("no tags at all is an empty allocation, not an error", () => {
+  assert.deepEqual(allocateTagArcs(new Map(), null), []);
+  assert.deepEqual(allocateTagArcs(new Map([[UNTAGGED, 4]]), null), [
+    { tag: UNTAGGED, start: 0, end: Math.PI * 2 },
+  ]);
+});
+
+test("focusing a tag gives it half the circle, centred on its own natural angle (review)", () => {
+  const counts = new Map([
+    ["rock", 4],
+    ["electronic", 4],
+    ["jazz", 4],
+  ]);
+  const arcs = allocateTagArcs(counts, "jazz");
+  const jazz = arcs.find((a) => a.tag === "jazz")!;
+  assert.ok(Math.abs(jazz.end - jazz.start - Math.PI) < 1e-9, "claims half the circle");
+
+  const others = arcs.filter((a) => a.tag !== "jazz");
+  const othersTotal = others.reduce((sum, a) => sum + (a.end - a.start), 0);
+  assert.ok(Math.abs(othersTotal - Math.PI) < 1e-9, "the rest share exactly what's left");
+
+  const mid = (jazz.start + jazz.end) / 2;
+  const drift = Math.atan2(Math.sin(mid - tagAngle("jazz")), Math.cos(mid - tagAngle("jazz")));
+  assert.ok(Math.abs(drift) < 1e-9, "grows in place rather than jumping elsewhere");
+});
+
+test("focusing an absent or untagged tag changes nothing", () => {
+  const counts = new Map([["rock", 4], ["jazz", 4]]);
+  assert.deepEqual(allocateTagArcs(counts, "reggae"), allocateTagArcs(counts, null));
+  assert.deepEqual(allocateTagArcs(counts, UNTAGGED), allocateTagArcs(counts, null));
+});
+
+const withTag = (name: string, match: number, tag?: string): ExploreNode => ({
+  name,
+  image: "",
+  status: "frontier",
+  match,
+  tag,
+});
+
+test("layoutSystem spreads a focused tag's own members across its bigger arc", () => {
+  // Jazz starts as a minority (2 of 6) so focusing it visibly grows its
+  // share rather than shrinking it — a tag that already dominates a
+  // System has nothing to gain from the fixed 50% focus share.
+  const neighbours = [
+    withTag("Jazz A", 0.9, "jazz"),
+    withTag("Jazz B", 0.8, "jazz"),
+    withTag("Rock A", 0.7, "rock"),
+    withTag("Electronic A", 0.6, "electronic"),
+    withTag("Blues A", 0.5, "blues"),
+    withTag("Pop A", 0.4, "pop"),
+  ];
+  const plain = layoutSystem(neighbours, { inner: 100, outer: 400 });
+  const focused = layoutSystem(neighbours, {
+    inner: 100,
+    outer: 400,
+    focusedTag: "jazz",
+  });
+  const angleOf = (p: { x: number; y: number }) => Math.atan2(p.y, p.x);
+  const angleSpan = (a: { x: number; y: number }, b: { x: number; y: number }) => {
+    const d = angleOf(a) - angleOf(b);
+    return Math.abs(Math.atan2(Math.sin(d), Math.cos(d)));
+  };
+  assert.ok(
+    angleSpan(focused[0], focused[1]) > angleSpan(plain[0], plain[1]),
+    "jazz's two members sit further apart once jazz has more room",
+  );
+  // Radius is still similarity and nothing else, focus or no focus.
+  for (let i = 0; i < plain.length; i++) {
+    assert.ok(
+      Math.abs(Math.hypot(plain[i].x, plain[i].y) - Math.hypot(focused[i].x, focused[i].y)) <
+        1e-6,
+    );
+  }
 });

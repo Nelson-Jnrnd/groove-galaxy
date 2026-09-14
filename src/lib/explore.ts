@@ -240,6 +240,15 @@ export interface SystemInput {
 export interface System {
   anchor: ExploreNode;
   neighbours: ExploreNode[];
+  /**
+   * Real similarity matches to the anchor that didn't make the cut —
+   * still ranked, just past `limit`. Focusing a style tag (§9 review —
+   * "clicking a tag... could bring the focus to this system... more
+   * artists of that tag are shown") pulls matching nodes back in from
+   * here rather than fetching anything new, so the radius-is-similarity
+   * rule (EXP-REQ-10) never has to bend for a node with no real match.
+   */
+  overflow: ExploreNode[];
 }
 
 /**
@@ -315,9 +324,13 @@ export function buildSystem(input: SystemInput): System {
     }
   }
 
+  const chosenKeys = new Set(chosen.map((n) => norm(n.name)));
+  const overflow = ranked.filter((n) => !chosenKeys.has(norm(n.name)));
+
   return {
     anchor: describe(anchor, galaxy, explored, undefined),
     neighbours: chosen,
+    overflow,
   };
 }
 
@@ -417,18 +430,6 @@ function markExplored(state: ExploreState): ExploreState {
   return { ...state, explored };
 }
 
-/**
- * EXP-REQ-16 — a long trail collapses in the middle rather than pushing the
- * controls off the page. `null` marks the elided run.
- */
-export function collapseTrail(
-  trail: TrailEntry[],
-  max = 3,
-): (TrailEntry | null)[] {
-  if (trail.length <= max) return [...trail];
-  return [trail[0], null, ...trail.slice(-(max - 1))];
-}
-
 /* ─── placing things (EXP-REQ-6, EXP-REQ-10) ─────────────────────────── */
 
 /** The golden angle — the same even spread the Galaxy's first frame uses. */
@@ -458,6 +459,72 @@ export function tagAngle(tag: string, seed?: string): number {
   const base = hashUnit(tag) * Math.PI * 2;
   if (!seed) return base;
   return base + (hashUnit(seed) - 0.5) * 0.9;
+}
+
+/** Bucket for a neighbour whose style tag isn't known (yet). */
+export const UNTAGGED = "";
+
+export interface TagArc {
+  tag: string;
+  start: number;
+  end: number;
+}
+
+/** How much of the circle a focused tag claims. */
+const FOCUS_SHARE = 0.5;
+
+/**
+ * Split the circle among the styles present in a System, in each tag's
+ * own natural direction (`tagAngle`) so which tags end up next to each
+ * other stays stable whether or not anything is focused. Ordinarily each
+ * tag's arc is sized by how many of its members are on screen; a focused
+ * tag instead claims a fixed, generous share and everyone else compresses
+ * into what's left — centred on the focused tag's own natural angle, so
+ * focusing reads as that part of the circle growing in place rather than
+ * the System reshuffling (review — "clicking a tag... zooming on that
+ * tag... the section of the zoomed tag is bigger").
+ */
+export function allocateTagArcs(
+  counts: Map<string, number>,
+  focused: string | null,
+): TagArc[] {
+  const tagged = [...counts.keys()]
+    .filter((t) => t !== UNTAGGED)
+    .sort((a, b) => tagAngle(a) - tagAngle(b));
+  const order = counts.has(UNTAGGED) ? [...tagged, UNTAGGED] : tagged;
+  if (!order.length) return [];
+
+  const isFocused = focused !== null && focused !== UNTAGGED && counts.has(focused);
+  const focusedFraction = isFocused ? FOCUS_SHARE : 0;
+  const otherFraction = 1 - focusedFraction;
+  const otherTotal =
+    order
+      .filter((t) => t !== focused)
+      .reduce((sum, t) => sum + (counts.get(t) ?? 0), 0) || 1;
+
+  // Walk the tags starting right after the focused one, so its neighbours
+  // on the circle stay its neighbours; an unfocused System just starts at
+  // the first tag in natural order.
+  const startIndex = isFocused ? order.indexOf(focused!) : -1;
+  const rest =
+    startIndex >= 0
+      ? [...order.slice(startIndex + 1), ...order.slice(0, startIndex)]
+      : order;
+
+  const arcs: TagArc[] = [];
+  let cursor = isFocused ? tagAngle(focused!) - focusedFraction * Math.PI : 0;
+  if (isFocused) {
+    const start = cursor;
+    cursor += focusedFraction * Math.PI * 2;
+    arcs.push({ tag: focused!, start, end: cursor });
+  }
+  for (const tag of rest) {
+    const fraction = ((counts.get(tag) ?? 0) / otherTotal) * otherFraction;
+    const start = cursor;
+    cursor += fraction * Math.PI * 2;
+    arcs.push({ tag, start, end: cursor });
+  }
+  return arcs;
 }
 
 export interface FrontierPlacement extends Point {
@@ -557,31 +624,55 @@ function rotate(p: Point, centre: Point, angle: number) {
  * A System's layout: the anchor at the origin, everything else at a radius
  * set by how similar it is to the anchor and nothing else (EXP-REQ-10).
  *
- * The angle is the golden spread for a node whose style tag is not yet
- * known, or that tag's own position on the circle once it is (§7 review —
- * "let style influence where a node sits on its orbit"); either way it is
- * then relaxed sideways for overlap. The radius is never touched by that
- * pass, so what the picture claims about similarity stays true.
+ * Angle belongs to style (EXP-REQ-10a): the circle is split into one arc
+ * per tag present (`allocateTagArcs`), a node's own angle is an even
+ * spread within its tag's arc, and the whole thing is then relaxed
+ * sideways for overlap. The radius is never touched by that pass, so what
+ * the picture claims about similarity stays true regardless of angle.
  */
 export function layoutSystem(
   neighbours: ExploreNode[],
-  options: { inner: number; outer: number; spacing?: number },
+  options: {
+    inner: number;
+    outer: number;
+    spacing?: number;
+    /** A tag currently claiming most of the circle (EXP-REQ-10a). */
+    focusedTag?: string | null;
+  },
 ): Point[] {
-  const { inner, outer } = options;
+  const { inner, outer, focusedTag = null } = options;
   const spacing = options.spacing ?? (outer - inner) * 0.34;
   const scores = neighbours.map((n) => (Number.isFinite(n.match) ? n.match! : 0));
   const top = Math.max(...scores, 0.0001);
   const low = Math.min(...scores.filter((s) => s > 0), top);
   const span = Math.max(top - low, 1e-6);
 
-  const points: Point[] = neighbours.map((_node, i) => {
+  const counts = new Map<string, number>();
+  for (const n of neighbours) {
+    const key = n.tag ?? UNTAGGED;
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+  }
+  const arcs = new Map(
+    allocateTagArcs(counts, focusedTag).map((a) => [a.tag, a]),
+  );
+  const seen = new Map<string, number>();
+
+  const points: Point[] = neighbours.map((node, i) => {
     const score = scores[i];
     // An artist with no similarity score at all — the one kept because the
     // visitor arrived through it (EXP-REQ-14) — sits at the outer edge.
     const t = score > 0 ? 1 - (score - low) / span : 1;
     const r = inner + (outer - inner) * t;
-    const node = neighbours[i];
-    const angle = node.tag ? tagAngle(node.tag, node.name) : i * GOLDEN;
+
+    const key = node.tag ?? UNTAGGED;
+    const arc = arcs.get(key)!;
+    const count = counts.get(key) ?? 1;
+    const within = seen.get(key) ?? 0;
+    seen.set(key, within + 1);
+    const angle =
+      count > 1
+        ? arc.start + (arc.end - arc.start) * ((within + 0.5) / count)
+        : (arc.start + arc.end) / 2;
     return { x: Math.cos(angle) * r, y: Math.sin(angle) * r };
   });
 
