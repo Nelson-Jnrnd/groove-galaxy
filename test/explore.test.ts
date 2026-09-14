@@ -17,7 +17,6 @@ import {
   deadEnd,
   beginExploration,
   buildSystem,
-  collapseTrail,
   currentAnchor,
   describeSystem,
   galaxyIndex,
@@ -395,21 +394,6 @@ test("Back walks the route rather than logging it", () => {
   assert.deepEqual(returned.trail.map((e) => e.name), ["Daft Punk", "Justice"]);
   // …but what has been explored stays explored.
   assert.ok(returned.explored.has("gesaffelstein"));
-});
-
-test("a long trail collapses in the middle, keeping both ends (EXP-REQ-16)", () => {
-  const trail = ["A", "B", "C", "D", "E"].map((n) => entry(n));
-  assert.deepEqual(collapseTrail(trail, 3).map((e) => e && e.name), [
-    "A",
-    null,
-    "D",
-    "E",
-  ]);
-  assert.deepEqual(
-    collapseTrail(trail.slice(0, 2), 3).map((e) => e && e.name),
-    ["A", "B"],
-    "a short trail is left alone",
-  );
 });
 
 /* ─── placement (EXP-REQ-6/10) ───────────────────────────────────────── */

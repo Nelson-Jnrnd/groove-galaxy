@@ -26,7 +26,6 @@ import {
   back,
   beginExploration,
   buildSystem,
-  collapseTrail,
   currentAnchor,
   deadEnd,
   describeSystem,
@@ -90,6 +89,47 @@ const plural = (n: number, one: string, many = one + "s") =>
 const reducedMotion = () =>
   window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
+/** One tag label, about to be placed around the outer edge of its wedge. */
+interface TagLabel {
+  tag: string;
+  hue: number;
+  angle: number;
+  /** Half of how much arc, in radians at its drawing radius, the chip needs. */
+  halfWidth: number;
+}
+
+/**
+ * Nudge tag labels apart along the ring they share, so two wedges whose
+ * angular ranges sit close together — or overlap outright — don't print
+ * their names on top of each other (review — "hard to see... particularly
+ * when slices overlap"). Angle only: a label always stays on the outer
+ * ring its wedge lives on, just not exactly at the mid-angle when a
+ * neighbour needs the room.
+ */
+function resolveLabelOverlap(labels: TagLabel[]) {
+  const gap = 0.035;
+  for (let pass = 0; pass < 30; pass++) {
+    let moved = false;
+    for (let i = 0; i < labels.length; i++) {
+      for (let j = i + 1; j < labels.length; j++) {
+        const a = labels[i];
+        const b = labels[j];
+        let diff = b.angle - a.angle;
+        while (diff <= -Math.PI) diff += Math.PI * 2;
+        while (diff > Math.PI) diff -= Math.PI * 2;
+        const needed = a.halfWidth + b.halfWidth + gap;
+        if (Math.abs(diff) >= needed) continue;
+        const push = (needed - Math.abs(diff)) / 2;
+        const sign = diff >= 0 ? 1 : -1;
+        a.angle -= sign * push;
+        b.angle += sign * push;
+        moved = true;
+      }
+    }
+    if (!moved) break;
+  }
+}
+
 /** A stable colour for a tag's wedge and label — same tag, same hue, always. */
 function tagHue(tag: string): number {
   let h = 2166136261;
@@ -98,6 +138,39 @@ function tagHue(tag: string): number {
     h = Math.imul(h, 16777619);
   }
   return ((h >>> 0) / 4294967296) * 360;
+}
+
+/**
+ * A tag's name, stylized as a small pill sitting right on the outer edge
+ * of its wedge — a filled, bordered chip in the tag's own hue reads far
+ * better against a busy System than plain text ever could (review —
+ * "hard to see... perhaps by stylizing it around the slice").
+ */
+function drawTagChip(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  text: string,
+  hue: number,
+) {
+  ctx.font = `500 11px "IBM Plex Sans", system-ui, sans-serif`;
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  const w = ctx.measureText(text).width + 14;
+  const h = 17;
+  const withRoundRect = ctx as CanvasRenderingContext2D & {
+    roundRect?: (x: number, y: number, w: number, h: number, r: number) => void;
+  };
+  ctx.beginPath();
+  if (withRoundRect.roundRect) withRoundRect.roundRect(x - w / 2, y - h / 2, w, h, h / 2);
+  else ctx.rect(x - w / 2, y - h / 2, w, h);
+  ctx.fillStyle = `hsla(${hue}, 45%, 13%, 0.82)`;
+  ctx.fill();
+  ctx.lineWidth = 1;
+  ctx.strokeStyle = `hsla(${hue}, 55%, 58%, 0.75)`;
+  ctx.stroke();
+  ctx.fillStyle = `hsla(${hue}, 65%, 88%, 0.95)`;
+  ctx.fillText(text, x, y + 0.5);
 }
 
 function sizeForListeners(n: number): number {
@@ -303,6 +376,9 @@ export function startExplorer(host: ExplorerHost): Explorer {
       else byTag.set(p.node.tag, [angle]);
     }
     const wedgeOuter = (OUTER + NODE_R_MAX + 70) * view.scale;
+    const labelRadius = wedgeOuter * 0.93;
+    ctx.font = `500 11px "IBM Plex Sans", system-ui, sans-serif`;
+    const labels: TagLabel[] = [];
     for (const [tag, angles] of byTag) {
       let lo = angles[0];
       let hi = angles[0];
@@ -324,12 +400,23 @@ export function startExplorer(host: ExplorerHost): Explorer {
       ctx.fillStyle = `hsla(${hue}, 50%, 60%, 0.055)`;
       ctx.fill();
 
-      const mid = (start + end) / 2;
-      ctx.font = `400 11px "IBM Plex Sans", system-ui, sans-serif`;
-      ctx.textAlign = "center";
-      ctx.textBaseline = "middle";
-      ctx.fillStyle = `hsla(${hue}, 55%, 78%, 0.6)`;
-      ctx.fillText(tag, cx + Math.cos(mid) * wedgeOuter * 0.97, cy + Math.sin(mid) * wedgeOuter * 0.97);
+      const width = ctx.measureText(tag).width + 14;
+      labels.push({
+        tag,
+        hue,
+        angle: (start + end) / 2,
+        halfWidth: (width / 2 + 6) / labelRadius,
+      });
+    }
+    resolveLabelOverlap(labels);
+    for (const l of labels) {
+      drawTagChip(
+        ctx,
+        cx + Math.cos(l.angle) * labelRadius,
+        cy + Math.sin(l.angle) * labelRadius,
+        l.tag,
+        l.hue,
+      );
     }
 
     // Orbits, not spokes: distance from the anchor is still similarity to
@@ -806,20 +893,14 @@ export function startExplorer(host: ExplorerHost): Explorer {
     root.addEventListener("click", () => host.onExit());
     trailBar.append(root);
 
-    for (const entry of collapseTrail(state.trail, 3)) {
-      trailBar.append(el("span", "trail__sep", "/"));
-      if (!entry) {
-        trailBar.append(el("span", "trail__ellipsis", "…"));
-        continue;
-      }
-      const here = norm(entry.name) === norm(currentAnchor(state).name);
-      const step = el("button", `trail__step${here ? " is-here" : ""}`);
-      step.type = "button";
-      step.textContent = entry.name;
-      if (here) step.setAttribute("aria-current", "true");
-      step.addEventListener("click", () => host.onTravel(entry.name));
-      trailBar.append(step);
-    }
+    // Only where you started and where you are now (review — a full path
+    // has no visual effect beyond the current System, so it's not worth
+    // the width): the intermediate hops are still reachable one at a time
+    // through Back, or all at once through Return to Galaxy.
+    trailBar.append(el("span", "trail__sep", "/"));
+    const here = el("span", "trail__step is-here", currentAnchor(state).name);
+    here.setAttribute("aria-current", "true");
+    trailBar.append(here);
   }
 
   /* ── the panel: the anchor, and everything around it ──────────────── */

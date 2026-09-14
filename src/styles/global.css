@@ -1164,7 +1164,7 @@ p { margin: 0; }
 .trail__step:hover { color: var(--text); text-decoration: underline; }
 .trail__step--home { color: var(--gold); }
 .trail__step.is-here { color: var(--text); font-weight: 500; cursor: default; }
-.trail__sep, .trail__ellipsis { color: var(--text-faint); font-size: 0.8rem; flex: 0 0 auto; }
+.trail__sep { color: var(--text-faint); font-size: 0.8rem; flex: 0 0 auto; }
 
 .explore__status {
   width: fit-content;

@@ -274,9 +274,15 @@ Every traversal appends to the current Trail, e.g. `Your Galaxy / Electronic
 cluster / Daft Punk / Justice / Gesaffelstein`. The full cluster portion is
 optional when exploration began directly from an artist.
 
-**EXP-REQ-16 — Trail UI.** A compact breadcrumb/trail control must remain
-visible in System View. Long trails should collapse older entries rather
-than consuming the page width, e.g. `Galaxy / … / Justice / Gesaffelstein`.
+**EXP-REQ-16 — Trail UI.** A compact breadcrumb control must remain visible
+in System View, showing only where the visitor started and where they are
+now, e.g. `Galaxy / Gesaffelstein` — never the full route. The intermediate
+hops change nothing about the System on screen, so displaying them costs
+width without adding information; they stay reachable one at a time
+through `Back`, or all at once through `Return to Galaxy` (EXP-REQ-19).
+The full Trail itself is still tracked (§11) for `Back`, for what counts
+as *Explored* (§3), and for dead-end detection — this only concerns what
+the breadcrumb shows.
 
 **EXP-REQ-17 — Trail state.** There are three relevant artist states.
 *Galaxy*: artist belongs to the user's current Galaxy. *Frontier*: artist is

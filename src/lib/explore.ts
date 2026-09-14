@@ -417,18 +417,6 @@ function markExplored(state: ExploreState): ExploreState {
   return { ...state, explored };
 }
 
-/**
- * EXP-REQ-16 — a long trail collapses in the middle rather than pushing the
- * controls off the page. `null` marks the elided run.
- */
-export function collapseTrail(
-  trail: TrailEntry[],
-  max = 3,
-): (TrailEntry | null)[] {
-  if (trail.length <= max) return [...trail];
-  return [trail[0], null, ...trail.slice(-(max - 1))];
-}
-
 /* ─── placing things (EXP-REQ-6, EXP-REQ-10) ─────────────────────────── */
 
 /** The golden angle — the same even spread the Galaxy's first frame uses. */
