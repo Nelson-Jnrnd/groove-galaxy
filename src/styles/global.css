@@ -494,6 +494,22 @@ p { margin: 0; }
 }
 .detail__links { margin-top: 0.7rem; font-size: 0.83rem; }
 
+.detail__tags { margin-top: 0.8rem; display: flex; flex-wrap: wrap; gap: 0.35rem; }
+.tag-toggle {
+  appearance: none;
+  -webkit-appearance: none;
+  cursor: pointer;
+  background: none;
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  padding: 0.18rem 0.6rem;
+  color: var(--text-dim);
+  font-family: var(--sans);
+  font-size: 0.72rem;
+}
+.tag-toggle:hover { color: var(--text); border-color: var(--text-faint); }
+.tag-toggle.is-active { color: var(--text); border-color: var(--green); background: rgba(95, 168, 119, 0.12); }
+
 .detail__near-head {
   margin-top: 1rem;
   padding-top: 0.85rem;

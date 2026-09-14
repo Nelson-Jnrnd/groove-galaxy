@@ -200,6 +200,23 @@ nodes.
 where available, and Frontier artists. Do not allow Galaxy artists to consume
 every slot if useful outside artists exist. An initial policy may reserve
 several Frontier positions whenever enough suitable candidates exist.
+Candidates that were ranked but didn't make the cut are not discarded —
+`buildSystem` keeps them as `overflow`, real similarity matches to the
+anchor that simply fell past the limit.
+
+**EXP-REQ-9a — Focusing a style.** Activating a style's label (clicking its
+wedge label on the canvas, or its toggle in the artist detail panel) gives
+that tag a fixed, generous share of the circle — about half — with every
+other style compressing into what's left (EXP-REQ-10a); the anchor does not
+move. Activating it also pulls in more of that style: `System.overflow` is
+checked for artists sharing the focused tag (fetching tags for whichever of
+those candidates don't have one yet — a burst of lookups spent only at the
+moment of focusing, never speculatively, so EXP-PRINCIPLE-3 holds), and
+matches are added to the System, ranked by their similarity to the anchor
+like everything else in it. Activating the same tag again, or a different
+one, clears the previous focus and its extra artists; at most one tag's
+expansion is ever showing. A focused tag is itself visually marked (bolder
+label, a brighter wedge) so the state is never ambiguous.
 
 **EXP-REQ-10 — Similarity representation.** Similarity to the anchor is
 primarily encoded through radial distance, drawn as the orbit ring a
@@ -208,16 +225,21 @@ orbits are stronger matches, farther orbits are weaker ones. An orbit ring
 carries the same two-colour marking as the node on it (§7): grey for the
 Galaxy, green for anything new.
 
-**EXP-REQ-10a — Angular position.** Where a neighbour sits *around* its
-orbit is driven by its leading style tag once known, so artists in the
-same style cluster together in direction rather than scattering evenly. A
-subtle wedge — a background tint behind the whole angular range a tag's
-members occupy, its name set at the outer edge — makes that grouping
-visible at a glance, like a slice of the System belonging to that style.
-Radius still belongs to similarity alone (EXP-REQ-10); angle and the wedge
-are what style gets to use. A neighbour without a tag yet keeps the even
-golden-angle spread and settles into its tag's position once the tag loads
-— background enrichment, same as artwork (§13).
+**EXP-REQ-10a — Angular position.** The circle is split into one arc per
+style tag present, sized by how many of its members are on screen (or, when
+a tag is focused, by EXP-REQ-9a's fixed share) — never by an independent
+per-tag placement, so arcs never gap or overlap each other. Each arc is
+centred on its tag's own direction (a stable hash of the tag name), so the
+same tag lands in the same direction on any System; a neighbour's own angle
+is then an even spread within its tag's arc. A subtle wedge — a background
+tint across that whole arc, its name curved along the outer edge — makes
+the grouping visible at a glance, like a slice of the System belonging to
+that style; a name too long for its arc wraps onto a second line rather
+than running past its neighbours. Radius still belongs to similarity alone
+(EXP-REQ-10); angle and the wedge are what style gets to use. A neighbour
+without a tag yet falls into an untagged bucket with its own arc and
+settles into its tag's slice once the tag loads — background enrichment,
+same as artwork (§13).
 
 **EXP-REQ-10b — No overlap.** Whatever radius, angle and size a neighbour
 ends up with, it must not overlap another neighbour. Resolving an overlap

@@ -20,6 +20,13 @@
  *      similarity lookup, which is what lets this go on indefinitely
  *      without downloading the whole of Last.fm (EXP-PRINCIPLE-3,
  *      EXP-REQ-13/24).
+ *
+ * Clicking a style's own label focuses it: its wedge claims half the
+ * circle, everyone else compresses into what's left, and whichever of the
+ * anchor's other matches share that style — already ranked, just past the
+ * usual cutoff — are pulled back in from `System.overflow` (EXP-REQ-9a).
+ * The anchor itself never moves; only the shape of the circle around it
+ * does.
  */
 import { norm, type Artist, type Cluster } from "../lib/build.ts";
 import {
@@ -32,7 +39,6 @@ import {
   galaxyIndex,
   previousAnchor,
   layoutSystem,
-  tagAngle,
   travel,
   type ExploreNode,
   type ExploreOrigin,
@@ -92,9 +98,10 @@ const reducedMotion = () =>
 /** One tag label, about to be placed around the outer edge of its wedge. */
 interface TagLabel {
   tag: string;
+  lines: string[];
   hue: number;
   angle: number;
-  /** Half of how much arc, in radians at its drawing radius, the chip needs. */
+  /** Half of how much arc, in radians at its drawing radius, the widest line needs. */
   halfWidth: number;
 }
 
@@ -140,37 +147,97 @@ function tagHue(tag: string): number {
   return ((h >>> 0) / 4294967296) * 360;
 }
 
+const TAG_FONT = `500 11px "IBM Plex Sans", system-ui, sans-serif`;
+/** Radial gap between wrapped lines of a tag label. */
+const ARC_LINE_GAP = 15;
+
 /**
- * A tag's name, stylized as a small pill sitting right on the outer edge
- * of its wedge — a filled, bordered chip in the tag's own hue reads far
- * better against a busy System than plain text ever could (review —
- * "hard to see... perhaps by stylizing it around the slice").
+ * Split a tag's name into at most two lines that each fit within
+ * `maxAngle` radians at `radius`, so a long tag never runs past its own
+ * neighbours (review — "make sure it's not too long — wrap around").
+ * Most tags are one or two words and never wrap at all.
  */
-function drawTagChip(
+function wrapArcText(
   ctx: CanvasRenderingContext2D,
-  x: number,
-  y: number,
   text: string,
+  radius: number,
+  maxAngle: number,
+): string[] {
+  const maxWidth = maxAngle * radius;
+  if (ctx.measureText(text).width <= maxWidth) return [text];
+  const words = text.split(" ");
+  const lines: string[] = [];
+  let current = "";
+  for (const word of words) {
+    const attempt = current ? `${current} ${word}` : word;
+    if (current && ctx.measureText(attempt).width > maxWidth) {
+      lines.push(current);
+      current = word;
+    } else {
+      current = attempt;
+    }
+  }
+  if (current) lines.push(current);
+  if (lines.length > 2) {
+    lines.length = 2;
+    lines[1] = lines[1].trimEnd() + "…";
+  }
+  return lines;
+}
+
+/**
+ * A tag's name, following the curve of its own wedge rather than sitting
+ * on top of it as a flat sticker (review — "wrap the text around the
+ * radius of the section"). Text is walked outward from `midAngle`
+ * character by character; on the lower half of the circle both the walk
+ * direction and each glyph's own rotation flip, so the label still reads
+ * left-to-right and right-side up no matter where around the System it
+ * ends up.
+ */
+function drawArcText(
+  ctx: CanvasRenderingContext2D,
+  cx: number,
+  cy: number,
+  lines: string[],
+  midAngle: number,
+  baseRadius: number,
   hue: number,
+  active = false,
 ) {
-  ctx.font = `500 11px "IBM Plex Sans", system-ui, sans-serif`;
+  ctx.font = active ? `700 11px "IBM Plex Sans", system-ui, sans-serif` : TAG_FONT;
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
-  const w = ctx.measureText(text).width + 14;
-  const h = 17;
-  const withRoundRect = ctx as CanvasRenderingContext2D & {
-    roundRect?: (x: number, y: number, w: number, h: number, r: number) => void;
-  };
-  ctx.beginPath();
-  if (withRoundRect.roundRect) withRoundRect.roundRect(x - w / 2, y - h / 2, w, h, h / 2);
-  else ctx.rect(x - w / 2, y - h / 2, w, h);
-  ctx.fillStyle = `hsla(${hue}, 45%, 13%, 0.82)`;
-  ctx.fill();
-  ctx.lineWidth = 1;
-  ctx.strokeStyle = `hsla(${hue}, 55%, 58%, 0.75)`;
-  ctx.stroke();
-  ctx.fillStyle = `hsla(${hue}, 65%, 88%, 0.95)`;
-  ctx.fillText(text, x, y + 0.5);
+  const flip = Math.sin(midAngle) > 0;
+  const sweep = flip ? -1 : 1;
+  const rotSign = flip ? -1 : 1;
+
+  lines.forEach((line, li) => {
+    // A second line has to land on the side of the first that still reads
+    // top-to-bottom on screen — outward for a label on the bottom half,
+    // inward for one on the top half, since "inward" and "outward" swap
+    // which one means "further down the page" between the two halves.
+    const radius = baseRadius + li * ARC_LINE_GAP * (flip ? 1 : -1);
+    const chars = [...line];
+    const widths = chars.map((c) => ctx.measureText(c).width);
+    const totalAngle = widths.reduce((sum, w) => sum + w, 0) / radius;
+    let angle = midAngle - sweep * (totalAngle / 2);
+    for (let i = 0; i < chars.length; i++) {
+      const half = widths[i] / radius / 2;
+      angle += sweep * half;
+      ctx.save();
+      ctx.translate(cx + Math.cos(angle) * radius, cy + Math.sin(angle) * radius);
+      ctx.rotate(angle + (rotSign * Math.PI) / 2);
+      ctx.lineWidth = 2.5;
+      ctx.strokeStyle = "rgba(20, 20, 19, 0.85)";
+      ctx.strokeText(chars[i], 0, 0);
+      ctx.fillStyle = active
+        ? `hsla(${hue}, 75%, 90%, 1)`
+        : `hsla(${hue}, 70%, 82%, 0.95)`;
+      ctx.fillText(chars[i], 0, 0);
+      ctx.restore();
+      angle += sweep * half;
+    }
+  });
 }
 
 function sizeForListeners(n: number): number {
@@ -272,6 +339,20 @@ export function startExplorer(host: ExplorerHost): Explorer {
   let highlighted: Placed | null = null;
   /** Bumped on every hop; a slow similarity answer for an old one is dropped. */
   let hop = 0;
+  /**
+   * A style claiming most of the circle (EXP-REQ-10a), or null. Reset on
+   * every hop — focus belongs to the System it was set in, not the trail.
+   */
+  let focusedTag: string | null = null;
+  /**
+   * Extra artists pulled in from `system.overflow` because they share the
+   * focused tag (review — "more artists of that tag are shown"). Cleared
+   * whenever focus changes or clears, so at most one tag's expansion is
+   * ever showing.
+   */
+  let expansion: ExploreNode[] = [];
+  /** Where each tag's label currently is, for hit-testing a click on one. */
+  let labelHits: { tag: string; angle: number; halfWidth: number; radius: number }[] = [];
 
   const images = new Map<string, HTMLImageElement>();
 
@@ -376,8 +457,8 @@ export function startExplorer(host: ExplorerHost): Explorer {
       else byTag.set(p.node.tag, [angle]);
     }
     const wedgeOuter = (OUTER + NODE_R_MAX + 70) * view.scale;
-    const labelRadius = wedgeOuter * 0.93;
-    ctx.font = `500 11px "IBM Plex Sans", system-ui, sans-serif`;
+    const labelRadius = wedgeOuter * 0.9;
+    ctx.font = TAG_FONT;
     const labels: TagLabel[] = [];
     for (const [tag, angles] of byTag) {
       let lo = angles[0];
@@ -393,30 +474,39 @@ export function startExplorer(host: ExplorerHost): Explorer {
       const start = lo - pad;
       const end = hi + pad;
       const hue = tagHue(tag);
+      const active = tag === focusedTag;
       ctx.beginPath();
       ctx.moveTo(cx, cy);
       ctx.arc(cx, cy, wedgeOuter, start, end);
       ctx.closePath();
-      ctx.fillStyle = `hsla(${hue}, 50%, 60%, 0.055)`;
+      ctx.fillStyle = `hsla(${hue}, 50%, 60%, ${active ? 0.12 : 0.055})`;
       ctx.fill();
 
-      const width = ctx.measureText(tag).width + 14;
+      // Never wider than the wedge itself, with a floor so a razor-thin
+      // slice still gets a readable line to wrap onto.
+      const lines = wrapArcText(ctx, tag, labelRadius, Math.max(end - start, 0.4));
+      const widest = Math.max(...lines.map((l) => ctx.measureText(l).width));
       labels.push({
         tag,
+        lines,
         hue,
         angle: (start + end) / 2,
-        halfWidth: (width / 2 + 6) / labelRadius,
+        halfWidth: (widest / 2 + 8) / labelRadius,
       });
     }
     resolveLabelOverlap(labels);
+    // World units, so a click can be hit-tested the same way node clicks
+    // already are, regardless of the current pan/zoom (the anchor always
+    // sits at the world origin).
+    labelHits = labels.map((l) => ({
+      tag: l.tag,
+      angle: l.angle,
+      halfWidth: l.halfWidth,
+      radius: labelRadius / view.scale,
+    }));
     for (const l of labels) {
-      drawTagChip(
-        ctx,
-        cx + Math.cos(l.angle) * labelRadius,
-        cy + Math.sin(l.angle) * labelRadius,
-        l.tag,
-        l.hue,
-      );
+      const active = l.tag === focusedTag;
+      drawArcText(ctx, cx, cy, l.lines, l.angle, labelRadius, l.hue, active);
     }
 
     // Orbits, not spokes: distance from the anchor is still similarity to
@@ -531,6 +621,23 @@ export function startExplorer(host: ExplorerHost): Explorer {
     return null;
   }
 
+  /** Which tag label, if any, a point falls near — the anchor is always
+   * the world origin, so this is the same angle/radius test as `hit`. */
+  function hitLabel(sx: number, sy: number): string | null {
+    const wx = toWorldX(sx);
+    const wy = toWorldY(sy);
+    const angle = Math.atan2(wy, wx);
+    const radius = Math.hypot(wx, wy);
+    for (const l of labelHits) {
+      if (Math.abs(radius - l.radius) > 26 / view.scale) continue;
+      let diff = angle - l.angle;
+      while (diff <= -Math.PI) diff += Math.PI * 2;
+      while (diff > Math.PI) diff -= Math.PI * 2;
+      if (Math.abs(diff) <= l.halfWidth + 0.02) return l.tag;
+    }
+    return null;
+  }
+
   if (canvas) {
     let panning = false;
     let movedBy = 0;
@@ -569,7 +676,12 @@ export function startExplorer(host: ExplorerHost): Explorer {
       if (!wasPanning || movedBy >= 6 || e.type !== "pointerup") return;
       const target = hit(p.x, p.y);
       // §10 — choosing another artist is what travelling *is*.
-      if (target) host.onTravel(target.node.name);
+      if (target) {
+        host.onTravel(target.node.name);
+        return;
+      }
+      const tag = hitLabel(p.x, p.y);
+      if (tag) setFocus(tag);
     };
     canvas.addEventListener("pointerup", end, { signal });
     canvas.addEventListener("pointercancel", () => { panning = false; }, { signal });
@@ -671,6 +783,37 @@ export function startExplorer(host: ExplorerHost): Explorer {
     show(next);
   }
 
+  /** Every node currently on screen besides the anchor: the System's own
+   * neighbours, plus whatever's been pulled in for a focused tag. */
+  const currentNodes = () => (system ? [...system.neighbours, ...expansion] : []);
+
+  /**
+   * (Re)lay out a given set of neighbour nodes, carrying over the size and
+   * position of any that were already on screen — a hop, a tag arriving
+   * late, or a focus change are all just "the node set or the layout
+   * inputs changed", so they all go through here.
+   */
+  function place(nodes: ExploreNode[]) {
+    const prevByName = new Map(placed.map((p) => [norm(p.node.name), p]));
+    const points = layoutSystem(nodes, { inner: INNER, outer: OUTER, focusedTag });
+    placed = nodes.map((node, i) => {
+      const prev = prevByName.get(norm(node.name));
+      return {
+        node,
+        x: points[i].x,
+        y: points[i].y,
+        r: prev ? prev.r : NODE_R,
+        fromX: prev ? prev.x : points[i].x,
+        fromY: prev ? prev.y : points[i].y,
+        fresh: !prev,
+      };
+    });
+    resolveOverlaps();
+    transition = reducedMotion() ? 1 : 0;
+    transitionFrom = performance.now();
+    draw();
+  }
+
   function show(next: System) {
     const previousPositions = new Map<string, { x: number; y: number }>();
     for (const p of placed) previousPositions.set(norm(p.node.name), { x: p.x, y: p.y });
@@ -680,22 +823,12 @@ export function startExplorer(host: ExplorerHost): Explorer {
         y: anchorPlaced.y,
       });
     }
+    const anchorFrom = previousPositions.get(norm(next.anchor.name));
 
     system = next;
-    const points = layoutSystem(next.neighbours, { inner: INNER, outer: OUTER });
-    placed = next.neighbours.map((node, i) => {
-      const from = previousPositions.get(norm(node.name));
-      return {
-        node,
-        x: points[i].x,
-        y: points[i].y,
-        r: NODE_R,
-        fromX: from ? from.x : points[i].x,
-        fromY: from ? from.y : points[i].y,
-        fresh: !from,
-      };
-    });
-    const anchorFrom = previousPositions.get(norm(next.anchor.name));
+    focusedTag = null;
+    expansion = [];
+    place(next.neighbours);
     anchorPlaced = {
       node: next.anchor,
       x: 0,
@@ -707,7 +840,6 @@ export function startExplorer(host: ExplorerHost): Explorer {
       fromY: anchorFrom ? anchorFrom.y : 0,
       fresh: false,
     };
-    resolveOverlaps();
     hovered = null;
     highlighted = null;
     stuck = deadEnd(next, previousAnchor(state)?.name ?? null);
@@ -732,7 +864,7 @@ export function startExplorer(host: ExplorerHost): Explorer {
         ? `Exploring ${next.anchor.name}. No further strong connections found here.`
         : describeSystem(next),
     );
-    void loadEnrichment(hop, next);
+    void loadEnrichment(hop, [next.anchor, ...next.neighbours]);
   }
 
   /**
@@ -802,12 +934,7 @@ export function startExplorer(host: ExplorerHost): Explorer {
     draw();
   }
 
-  /**
-   * A node whose size or angle depends on data that just arrived. Either
-   * can introduce a fresh overlap, so both end in the same settle pass
-   * (review — "position around their own orbit could be influenced by the
-   * style").
-   */
+  /** A node's listener count just arrived — resize it and settle any overlap that opens up. */
   function applyListeners(node: ExploreNode, value: number) {
     node.listeners = value;
     if (node === anchorPlaced?.node) return; // the star's size never depends on this
@@ -818,17 +945,64 @@ export function startExplorer(host: ExplorerHost): Explorer {
     settleFrom(before);
   }
 
+  /**
+   * A tag arriving late can shrink or grow every tag's arc, not just its
+   * own node's — the whole System goes through the shared layout again
+   * (review — "position around their own orbit could be influenced by the
+   * style").
+   */
   function applyTag(node: ExploreNode, tag: string) {
     node.tag = tag;
     if (node === anchorPlaced?.node) return; // the star sits at the centre regardless
-    const p = placed.find((q) => q.node === node);
-    if (!p) return;
-    const before = snapshot();
-    const angle = tagAngle(tag, node.name);
-    const radius = Math.hypot(p.x, p.y) || INNER;
-    p.x = Math.cos(angle) * radius;
-    p.y = Math.sin(angle) * radius;
-    settleFrom(before);
+    if (!placed.some((p) => p.node === node)) return;
+    place(currentNodes());
+  }
+
+  /**
+   * A tag was clicked (or activated from the panel's style list). The
+   * same tag again clears the focus; a different one replaces it — at
+   * most one tag's extra artists are ever showing at once (review —
+   * "clicking a tag... could bring the focus to this system... zooming
+   * on that tag").
+   */
+  function setFocus(tag: string) {
+    if (!system) return;
+    const next = focusedTag === tag ? null : tag;
+    focusedTag = next;
+    if (next === null) expansion = [];
+    place(currentNodes());
+    renderPanel();
+    if (next) void expandFocus(next);
+  }
+
+  /**
+   * The anchor's own similarity list already holds more matches than a
+   * System ever shows (`buildSystem`'s `overflow`, EXP-REQ-9). Focusing a
+   * tag is the one moment worth spending a burst of lookups on: which of
+   * those hidden candidates share it. Nothing here is a new similarity
+   * request (EXP-PRINCIPLE-3 stays intact) — only tag lookups, and only
+   * for artists the anchor was already shown to be close to.
+   */
+  async function expandFocus(tag: string) {
+    if (!system) return;
+    const token = hop;
+    const pool = system.overflow.filter((n) => !n.tag).slice(0, 24);
+    await Promise.all(
+      pool.map(async (n) => {
+        const found = await api.tags(n.name).catch(() => []);
+        if (found.length) n.tag = found[0];
+      }),
+    );
+    if (dead || token !== hop || focusedTag !== tag || !system) return;
+
+    const matches = system.overflow
+      .filter((n) => n.tag === tag)
+      .sort((a, b) => (b.match ?? 0) - (a.match ?? 0))
+      .slice(0, 8);
+    if (!matches.length) return;
+    expansion = matches;
+    place(currentNodes());
+    void loadEnrichment(hop, matches);
   }
 
   /**
@@ -837,11 +1011,10 @@ export function startExplorer(host: ExplorerHost): Explorer {
    * complete and readable without any of it. Nothing is prefetched for
    * artists that merely *might* be travelled to next.
    */
-  async function loadEnrichment(token: number, next: System) {
+  async function loadEnrichment(token: number, nodes: ExploreNode[]) {
     if (saveData) return;
-    const wanted = [next.anchor, ...next.neighbours];
     await Promise.all(
-      wanted.map(async (node) => {
+      nodes.map(async (node) => {
         const key = norm(node.name);
         await Promise.all([
           (async () => {
@@ -857,7 +1030,7 @@ export function startExplorer(host: ExplorerHost): Explorer {
               draw();
             };
             img.onerror = () => {};
-            img.src = sized(url, node === next.anchor ? DETAIL_PX : THUMB_PX);
+            img.src = sized(url, node === anchorPlaced?.node ? DETAIL_PX : THUMB_PX);
           })(),
           (async () => {
             if (node.listeners !== undefined) return;
@@ -974,6 +1147,23 @@ export function startExplorer(host: ExplorerHost): Explorer {
     a.rel = "noopener noreferrer";
     link.append(a);
     body.append(link);
+
+    // §21 — the same "zoom in on a style" the canvas offers by clicking a
+    // wedge label, reachable without a pointer: one toggle button per
+    // style currently on screen.
+    const tags = [...new Set(placed.map((p) => p.node.tag).filter((t): t is string => !!t))]
+      .sort();
+    if (tags.length) {
+      const tagList = el("p", "detail__tags");
+      for (const tag of tags) {
+        const btn = el("button", "tag-toggle" + (tag === focusedTag ? " is-active" : ""), tag);
+        btn.type = "button";
+        btn.setAttribute("aria-pressed", String(tag === focusedTag));
+        btn.addEventListener("click", () => setFocus(tag));
+        tagList.append(btn);
+      }
+      body.append(tagList);
+    }
 
     body.append(
       el(
