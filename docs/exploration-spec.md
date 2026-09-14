@@ -208,15 +208,30 @@ anchor that simply fell past the limit.
 wedge label on the canvas, or its toggle in the artist detail panel) gives
 that tag a fixed, generous share of the circle — about half — with every
 other style compressing into what's left (EXP-REQ-10a); the anchor does not
-move. Activating it also pulls in more of that style: `System.overflow` is
-checked for artists sharing the focused tag (fetching tags for whichever of
-those candidates don't have one yet — a burst of lookups spent only at the
-moment of focusing, never speculatively, so EXP-PRINCIPLE-3 holds), and
-matches are added to the System, ranked by their similarity to the anchor
-like everything else in it. Activating the same tag again, or a different
-one, clears the previous focus and its extra artists; at most one tag's
-expansion is ever showing. A focused tag is itself visually marked (bolder
-label, a brighter wedge) so the state is never ambiguous.
+move. Activating it also pulls in more of that style, from two sources in
+order:
+
+1. `System.overflow` — artists the anchor's own similarity list already
+   ranked but had no room for. Tags are fetched for whichever of those
+   candidates don't have one yet (a burst of lookups spent only at the
+   moment of focusing, never speculatively, so EXP-PRINCIPLE-3 holds), and
+   whichever share the focused tag are added, placed by their real
+   similarity to the anchor like everything else in the System.
+2. Because a tag rarely dominates that list — leaving (1) often thin or
+   empty — every artist already on screen carrying the focused tag becomes
+   a seed, and Last.fm's own similarity data around *those* artists (the
+   same kind of lookup travelling already spends one of per hop,
+   EXP-REQ-13, just several of them here) fills in whatever (1) didn't.
+   These have no similarity score to the anchor, so they sit at the outer
+   rim — the same treatment already given an artist kept with no known
+   match (EXP-REQ-14) — and their own tag is left for the normal lazy
+   fetch to confirm rather than assumed from the seed that found them, so
+   a wrongly-guessed tag can never linger unverified.
+
+Activating the same tag again, or a different one, clears the previous
+focus and its extra artists; at most one tag's expansion is ever showing.
+A focused tag is itself visually marked (bolder label, a brighter wedge)
+so the state is never ambiguous.
 
 **EXP-REQ-10 — Similarity representation.** Similarity to the anchor is
 primarily encoded through radial distance, drawn as the orbit ring a

@@ -22,11 +22,13 @@
  *      EXP-REQ-13/24).
  *
  * Clicking a style's own label focuses it: its wedge claims half the
- * circle, everyone else compresses into what's left, and whichever of the
- * anchor's other matches share that style — already ranked, just past the
- * usual cutoff — are pulled back in from `System.overflow` (EXP-REQ-9a).
- * The anchor itself never moves; only the shape of the circle around it
- * does.
+ * circle, everyone else compresses into what's left, and it pulls in more
+ * of that style from two sources — the anchor's own matches that were
+ * ranked but cut for space (`System.overflow`), then, since a tag rarely
+ * dominates that list on its own, a second-degree cast through whatever
+ * is already on screen in that style, asking Last.fm what *they* are
+ * close to (EXP-REQ-9a). The anchor itself never moves; only the shape of
+ * the circle around it does.
  */
 import { norm, type Artist, type Cluster } from "../lib/build.ts";
 import {
@@ -986,23 +988,82 @@ export function startExplorer(host: ExplorerHost): Explorer {
   async function expandFocus(tag: string) {
     if (!system) return;
     const token = hop;
+
+    // First, the cheap source: candidates the anchor's own similarity
+    // list already ranked but had no room for. These carry a real match
+    // to the anchor, so they place properly once their tag is confirmed.
     const pool = system.overflow.filter((n) => !n.tag).slice(0, 24);
     await Promise.all(
       pool.map(async (n) => {
-        const found = await api.tags(n.name).catch(() => []);
-        if (found.length) n.tag = found[0];
+        const tags = await api.tags(n.name).catch(() => []);
+        if (tags.length) n.tag = tags[0];
+      }),
+    );
+    if (dead || token !== hop || focusedTag !== tag || !system) return;
+    const direct = system.overflow.filter((n) => n.tag === tag);
+
+    // That alone is often thin or empty — a tag rarely dominates the
+    // anchor's own top-40 (review — "most of the time it doesn't add
+    // any new artists"). So cast wider: whatever's already on screen
+    // carrying this tag is itself a seed, and Last.fm's own similarity
+    // data around *those* artists is exactly the same kind of lookup
+    // travelling already spends one of per hop (EXP-REQ-13) — just
+    // several of them, spent only at the moment of focusing, not
+    // speculatively (EXP-PRINCIPLE-3). These new artists have no
+    // similarity score to the anchor, so they sit at the outer rim —
+    // the same treatment already given an artist kept with no known
+    // match (EXP-REQ-14) — and their own tag is left for the normal
+    // lazy fetch to confirm, same as any other new node, rather than
+    // assumed from the seed that found them.
+    const shown = new Set(
+      [anchorPlaced?.node.name, ...currentNodes().map((n) => n.name), ...direct.map((n) => n.name)]
+        .filter((n): n is string => !!n)
+        .map(norm),
+    );
+    const seeds = placed
+      .filter((p) => p.node.tag === tag)
+      .map((p) => p.node.name)
+      .slice(0, 6);
+    const found = new Map<string, ExploreNode>();
+    await Promise.all(
+      seeds.map(async (seedName) => {
+        const list = await api.similar(seedName).catch(() => []);
+        for (const entry of list.slice(0, 15)) {
+          const key = norm(entry.name);
+          if (!key || shown.has(key) || found.has(key)) continue;
+          found.set(key, describeExpansion(entry.name.trim()));
+        }
       }),
     );
     if (dead || token !== hop || focusedTag !== tag || !system) return;
 
-    const matches = system.overflow
-      .filter((n) => n.tag === tag)
-      .sort((a, b) => (b.match ?? 0) - (a.match ?? 0))
-      .slice(0, 8);
+    const matches = [...direct, ...found.values()].slice(0, 14);
     if (!matches.length) return;
     expansion = matches;
     place(currentNodes());
     void loadEnrichment(hop, matches);
+  }
+
+  /** A second-degree candidate: known territory if it's in the Galaxy,
+   * otherwise a plain Frontier node — no match to the anchor to report,
+   * unlike `describe` in explore.ts, which always has one. */
+  function describeExpansion(name: string): ExploreNode {
+    const key = norm(name);
+    const known = galaxy.get(key);
+    if (known) {
+      return {
+        name: known.name,
+        image: known.image,
+        status: "galaxy",
+        galaxyArtistId: known.id,
+        clusterId: known.cluster >= 0 ? known.cluster : undefined,
+      };
+    }
+    return {
+      name,
+      image: "",
+      status: state.explored.has(key) ? "explored" : "frontier",
+    };
   }
 
   /**
