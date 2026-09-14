@@ -196,21 +196,38 @@ every slot if useful outside artists exist. An initial policy may reserve
 several Frontier positions whenever enough suitable candidates exist.
 
 **EXP-REQ-10 — Similarity representation.** Similarity to the anchor is
-primarily encoded through radial distance. Stronger match: closer to the
-center. Weaker match: farther away. This means node size does not need to
-represent similarity.
+primarily encoded through radial distance, drawn as the orbit ring a
+neighbour sits on rather than a spoke pointing at the anchor — closer
+orbits are stronger matches, farther orbits are weaker ones. An orbit ring
+carries the same status marking as the node on it (solid for the Galaxy,
+dashed beyond it, green once visited), so the ring reads correctly before
+the node on it is even in focus.
 
-**EXP-REQ-11 — Node size.** System View should use approximately uniform
-neighbour node sizes. The existing Galaxy uses size to mean the user's play
-count; using size to mean something different in Exploration Mode would be
-misleading. The anchor may be larger solely as an interaction/focus
-treatment. Personal play counts for Galaxy artists remain available in their
-details.
+**EXP-REQ-10a — Angular position.** Where a neighbour sits *around* its
+orbit is driven by its leading style tag once known, so artists in the
+same style cluster together in direction rather than scattering evenly.
+Radius still belongs to similarity alone (EXP-REQ-10); angle is the one
+channel free for style to use. A neighbour without a tag yet keeps the
+even golden-angle spread and settles into its tag's position once the tag
+loads — background enrichment, same as artwork (§13).
+
+**EXP-REQ-11 — Node size.** Neighbour node size reflects the artist's
+global Last.fm listener count — how widely known they are — never the
+user's personal plays, and never as large as the anchor. Listener counts
+are background enrichment fetched the same way as artwork (§13,
+EXP-REQ-20): only for the anchor and the artists actually on screen, never
+prefetched for a merely-possible next hop. A node starts at a small
+default size and grows or shrinks into its true size once the count
+loads. The anchor is fixed larger than any neighbour can become, so it
+stays recognisably the centre of the System regardless of how famous its
+neighbours are.
 
 **EXP-REQ-12 — Galaxy status.** Artists belonging to the current Galaxy must
 remain recognisable as known territory. Their cluster identity may be reused
 through colour. Frontier artists remain neutral. A small legend should
-explain: `In your Galaxy`, `Beyond your Galaxy`, `Already explored`.
+explain: `In your Galaxy`, `Beyond your Galaxy`, `Visited this trip` — each
+with a short reason so the distinction reads at a glance rather than
+needing to be inferred.
 
 ## 10. Travelling between systems
 

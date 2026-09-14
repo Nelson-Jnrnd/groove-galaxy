@@ -46,6 +46,19 @@ export interface ExploreNode {
   clusterId?: number;
   /** Similarity to whatever this view is centred on, 0–1, when known. */
   match?: number;
+  /**
+   * Global listener count, when known. Drives node size in System View —
+   * distance from the anchor is already spoken for by `match` (EXP-REQ-10),
+   * so size is free to mean something else: how widely known this artist
+   * is, never more than the anchor itself.
+   */
+  listeners?: number;
+  /**
+   * This artist's leading style tag, when known. Nodes sharing a tag are
+   * placed near each other around their orbit, so style becomes something
+   * you can see in the shape of the System rather than only read in text.
+   */
+  tag?: string;
 }
 
 /** A link from one Galaxy artist out to a candidate beyond the Galaxy. */
@@ -324,6 +337,7 @@ function describe(
       galaxyArtistId: known.id,
       clusterId: known.cluster >= 0 ? known.cluster : undefined,
       match,
+      tag: known.tags[0],
     };
   }
   return {
@@ -419,6 +433,32 @@ export function collapseTrail(
 
 /** The golden angle — the same even spread the Galaxy's first frame uses. */
 const GOLDEN = Math.PI * (3 - Math.sqrt(5));
+
+/** A small stable hash, for picking a deterministic angle out of a string. */
+function hashUnit(s: string): number {
+  let h = 2166136261;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return (h >>> 0) / 4294967296;
+}
+
+/**
+ * Where a node with this style tag sits around its orbit.
+ *
+ * The tag alone picks a position on the circle — the same tag always lands
+ * in the same place, on any System, so "electronic" artists across a whole
+ * exploration session cluster in the same direction rather than wherever
+ * they happened to be listed. `seed` (normally the artist's own name)
+ * spreads artists sharing a tag across a small arc instead of stacking them
+ * on the exact same point.
+ */
+export function tagAngle(tag: string, seed?: string): number {
+  const base = hashUnit(tag) * Math.PI * 2;
+  if (!seed) return base;
+  return base + (hashUnit(seed) - 0.5) * 0.9;
+}
 
 export interface FrontierPlacement extends Point {
   name: string;
@@ -517,9 +557,11 @@ function rotate(p: Point, centre: Point, angle: number) {
  * A System's layout: the anchor at the origin, everything else at a radius
  * set by how similar it is to the anchor and nothing else (EXP-REQ-10).
  *
- * Angles are the golden spread, then relaxed sideways for overlap — the
- * radius is never touched by that pass, so what the picture claims about
- * similarity stays true.
+ * The angle is the golden spread for a node whose style tag is not yet
+ * known, or that tag's own position on the circle once it is (§7 review —
+ * "let style influence where a node sits on its orbit"); either way it is
+ * then relaxed sideways for overlap. The radius is never touched by that
+ * pass, so what the picture claims about similarity stays true.
  */
 export function layoutSystem(
   neighbours: ExploreNode[],
@@ -538,7 +580,8 @@ export function layoutSystem(
     // visitor arrived through it (EXP-REQ-14) — sits at the outer edge.
     const t = score > 0 ? 1 - (score - low) / span : 1;
     const r = inner + (outer - inner) * t;
-    const angle = i * GOLDEN;
+    const node = neighbours[i];
+    const angle = node.tag ? tagAngle(node.tag, node.name) : i * GOLDEN;
     return { x: Math.cos(angle) * r, y: Math.sin(angle) * r };
   });
 
