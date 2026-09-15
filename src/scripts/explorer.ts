@@ -47,6 +47,7 @@ import {
   type ExploreNode,
   type ExploreOrigin,
   type ExploreState,
+  type Point,
   type System,
   type TagArc,
   type TrailEntry,
@@ -309,6 +310,13 @@ export interface ExplorerHost {
   origin: ExploreOrigin;
   /** The artist to open first. */
   anchor: string;
+  /**
+   * Where that artist's bubble sat on the Galaxy map, in stage pixels, so
+   * the anchor can fly in from there instead of just appearing at the
+   * centre (review — "the clicked bubble becomes the anchor"). Absent when
+   * there was no bubble to fly from (opened straight from a URL).
+   */
+  entryFrom?: { x: number; y: number };
   /** The Galaxy underneath: what counts as known territory (§3, §18). */
   artists: Artist[];
   clusters: Cluster[];
@@ -370,6 +378,13 @@ export function startExplorer(host: ExplorerHost): Explorer {
   let stuck = false;
   let placed: Placed[] = [];
   let anchorPlaced: Placed | null = null;
+  /**
+   * World position of `host.entryFrom`, consumed the one time the very
+   * first System appears — that's what lets the anchor fly in from the
+   * bubble that was actually clicked, the same way it already slides from
+   * a neighbour's position on every later hop (`show`'s own `anchorFrom`).
+   */
+  let initialAnchorFrom: Point | null = null;
   /**
    * This System's style wedges — the fixed allocation `layoutSystem` placed
    * the nodes into, not anything derived from where they've since drifted.
@@ -928,7 +943,14 @@ export function startExplorer(host: ExplorerHost): Explorer {
         y: anchorPlaced.y,
       });
     }
-    const anchorFrom = previousPositions.get(norm(next.anchor.name));
+    // On the very first System, there is no previous node to slide from —
+    // except the bubble this exploration was opened from, if there was one
+    // (`initialAnchorFrom`). Consumed once: a later hop that lands on an
+    // artist not currently on screen has always just appeared at the
+    // centre with no slide, and should keep doing that rather than reusing
+    // a stale, unrelated map position.
+    const anchorFrom = previousPositions.get(norm(next.anchor.name)) ?? initialAnchorFrom;
+    initialAnchorFrom = null;
 
     system = next;
     focusedTag = null;
@@ -1492,6 +1514,9 @@ export function startExplorer(host: ExplorerHost): Explorer {
   const observer = new ResizeObserver(resize);
   observer.observe(stage);
   resize();
+  if (host.entryFrom) {
+    initialAnchorFrom = { x: toWorldX(host.entryFrom.x), y: toWorldY(host.entryFrom.y) };
+  }
   void open(host.anchor);
 
   return {
