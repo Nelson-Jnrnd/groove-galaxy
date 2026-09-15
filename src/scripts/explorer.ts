@@ -47,6 +47,7 @@ import {
   type ExploreNode,
   type ExploreOrigin,
   type ExploreState,
+  type Point,
   type System,
   type TagArc,
   type TrailEntry,
@@ -58,9 +59,9 @@ import { announce, lastFmArtistUrl } from "./map.ts";
 /* ─── geometry ───────────────────────────────────────────────────────── */
 
 /** Closest a neighbour is ever drawn to the anchor, in world units. */
-const INNER = 150;
+const INNER = 260;
 /** …and the farthest. Everything in between is similarity. */
-const OUTER = 430;
+const OUTER = 800;
 const ANCHOR_R = 54;
 /** Starting size, before a node's listener count has loaded. */
 const NODE_R = 20;
@@ -81,6 +82,13 @@ const LISTENERS_LOG_MAX = 6.3; // ~2,000,000 listeners
 const TRANSITION_MS = 520;
 /** Breathing room between adjacent style wedges, each side, in radians. */
 const WEDGE_GAP = 0.05;
+/**
+ * How many extra artists `expandFocus` can pull in for an opened tag. Once
+ * open, that style has the whole circle to itself rather than half of it
+ * (review — "open it fully... only show that style... bring more artists
+ * in"), so this is well past a normal System's own neighbour cap.
+ */
+const FOCUS_LIMIT = 40;
 const THUMB_PX = "64s";
 const DETAIL_PX = "174s";
 const UNCLUSTERED = "#6d6a62";
@@ -302,6 +310,13 @@ export interface ExplorerHost {
   origin: ExploreOrigin;
   /** The artist to open first. */
   anchor: string;
+  /**
+   * Where that artist's bubble sat on the Galaxy map, in stage pixels, so
+   * the anchor can fly in from there instead of just appearing at the
+   * centre (review — "the clicked bubble becomes the anchor"). Absent when
+   * there was no bubble to fly from (opened straight from a URL).
+   */
+  entryFrom?: { x: number; y: number };
   /** The Galaxy underneath: what counts as known territory (§3, §18). */
   artists: Artist[];
   clusters: Cluster[];
@@ -363,6 +378,13 @@ export function startExplorer(host: ExplorerHost): Explorer {
   let stuck = false;
   let placed: Placed[] = [];
   let anchorPlaced: Placed | null = null;
+  /**
+   * World position of `host.entryFrom`, consumed the one time the very
+   * first System appears — that's what lets the anchor fly in from the
+   * bubble that was actually clicked, the same way it already slides from
+   * a neighbour's position on every later hop (`show`'s own `anchorFrom`).
+   */
+  let initialAnchorFrom: Point | null = null;
   /**
    * This System's style wedges — the fixed allocation `layoutSystem` placed
    * the nodes into, not anything derived from where they've since drifted.
@@ -813,9 +835,21 @@ export function startExplorer(host: ExplorerHost): Explorer {
     show(next);
   }
 
-  /** Every node currently on screen besides the anchor: the System's own
-   * neighbours, plus whatever's been pulled in for a focused tag. */
-  const currentNodes = () => (system ? [...system.neighbours, ...expansion] : []);
+  /**
+   * Every node currently on screen besides the anchor. Ordinarily the
+   * System's own neighbours; focusing a tag instead opens onto *only* that
+   * style (review — "open it fully and only show that style"), so the rest
+   * of the neighbours drop out and the tag's own pulled-in artists
+   * (`expansion`) — which is always for the currently focused tag, however
+   * their own tag lookup is still pending — fill the space they leave.
+   */
+  const currentNodes = () => {
+    if (!system) return [];
+    const neighbours = focusedTag
+      ? system.neighbours.filter((n) => n.tag === focusedTag)
+      : system.neighbours;
+    return [...neighbours, ...expansion];
+  };
 
   /**
    * (Re)lay out a given set of neighbour nodes, carrying over the size and
@@ -825,18 +859,27 @@ export function startExplorer(host: ExplorerHost): Explorer {
    */
   function place(nodes: ExploreNode[]) {
     const prevByName = new Map(placed.map((p) => [norm(p.node.name), p]));
-    const points = layoutSystem(nodes, { inner: INNER, outer: OUTER, focusedTag });
+    // A focused tag owns the whole circle, not just its own members' real
+    // tags — an artist pulled in by second-degree similarity can resolve to
+    // a *different* leading tag once its own lookup lands, and that must
+    // not grow a second wedge to click into (review — "close it instead of
+    // clicking on another"). So every node counts as the focused tag for
+    // layout purposes here, whatever `node.tag` actually says; `nodes`
+    // itself (used below for the real `placed` entries) is untouched.
+    const openTag = focusedTag;
+    const layoutNodes = openTag ? nodes.map((n) => ({ ...n, tag: openTag })) : nodes;
+    const points = layoutSystem(layoutNodes, { inner: INNER, outer: OUTER });
 
     // Same partition `layoutSystem` used internally to place the points
     // above, kept here so the wedges drawn behind them can match exactly
     // instead of being re-derived from wherever the nodes end up.
     fromTagArcs = new Map(tagArcs.map((a) => [a.tag, a]));
     const counts = new Map<string, number>();
-    for (const node of nodes) {
+    for (const node of layoutNodes) {
       const key = node.tag ?? UNTAGGED;
       counts.set(key, (counts.get(key) ?? 0) + 1);
     }
-    tagArcs = allocateTagArcs(counts, focusedTag);
+    tagArcs = allocateTagArcs(counts, null);
 
     placed = nodes.map((node, i) => {
       const prev = prevByName.get(norm(node.name));
@@ -900,7 +943,14 @@ export function startExplorer(host: ExplorerHost): Explorer {
         y: anchorPlaced.y,
       });
     }
-    const anchorFrom = previousPositions.get(norm(next.anchor.name));
+    // On the very first System, there is no previous node to slide from —
+    // except the bubble this exploration was opened from, if there was one
+    // (`initialAnchorFrom`). Consumed once: a later hop that lands on an
+    // artist not currently on screen has always just appeared at the
+    // centre with no slide, and should keep doing that rather than reusing
+    // a stale, unrelated map position.
+    const anchorFrom = previousPositions.get(norm(next.anchor.name)) ?? initialAnchorFrom;
+    initialAnchorFrom = null;
 
     system = next;
     focusedTag = null;
@@ -958,6 +1008,10 @@ export function startExplorer(host: ExplorerHost): Explorer {
   function resolveOverlaps() {
     const margin = 6;
     const arcByTag = new Map(tagArcs.map((a) => [a.tag, a]));
+    // Matches `place`'s own substitution: while a tag is focused every node
+    // was laid out — and given its wedge — as that tag regardless of its
+    // real one, so it has to be looked up the same way here too.
+    const arcFor = (p: Placed) => arcByTag.get(focusedTag ?? p.node.tag ?? UNTAGGED);
     for (let pass = 0; pass < 40; pass++) {
       let moved = false;
       for (let i = 0; i < placed.length; i++) {
@@ -972,8 +1026,8 @@ export function startExplorer(host: ExplorerHost): Explorer {
           const push = (min - dist) / 2 + 0.5;
           const ux = dx / dist;
           const uy = dy / dist;
-          nudge(a, -ux * push, -uy * push, arcByTag.get(a.node.tag ?? UNTAGGED));
-          nudge(b, ux * push, uy * push, arcByTag.get(b.node.tag ?? UNTAGGED));
+          nudge(a, -ux * push, -uy * push, arcFor(a));
+          nudge(b, ux * push, uy * push, arcFor(b));
           moved = true;
         }
       }
@@ -1057,21 +1111,28 @@ export function startExplorer(host: ExplorerHost): Explorer {
    * A tag arriving late can shrink or grow every tag's arc, not just its
    * own node's — the whole System goes through the shared layout again
    * (review — "position around their own orbit could be influenced by the
-   * style").
+   * style"). It can also be the tag a focus is waiting on: a neighbour
+   * with no tag yet is invisible while a *different* tag is open
+   * (`currentNodes` filters it out), so this checks the System's full
+   * roster, not just what's currently drawn, or a neighbour confirming
+   * the open tag after the fact would never reappear.
    */
   function applyTag(node: ExploreNode, tag: string) {
     node.tag = tag;
     if (node === anchorPlaced?.node) return; // the star sits at the centre regardless
-    if (!placed.some((p) => p.node === node)) return;
+    if (!system) return;
+    const known = system.neighbours.includes(node) || expansion.includes(node);
+    if (!known) return;
     place(currentNodes());
   }
 
   /**
-   * A tag was clicked (or activated from the panel's style list). The
-   * same tag again clears the focus; a different one replaces it — at
-   * most one tag's extra artists are ever showing at once (review —
-   * "clicking a tag... could bring the focus to this system... zooming
-   * on that tag").
+   * A tag was clicked (or activated from the panel's style list) — it opens
+   * onto that style alone, the rest of the System dropping out of view
+   * (`currentNodes`). Clicking the *same* tag again is the only way back
+   * (review — "clicking again on that tag... to close it"): with every
+   * other tag's wedge and label gone from the circle, there is nothing
+   * else on screen to click into a different one.
    */
   function setFocus(tag: string) {
     if (!system) return;
@@ -1098,7 +1159,7 @@ export function startExplorer(host: ExplorerHost): Explorer {
     // First, the cheap source: candidates the anchor's own similarity
     // list already ranked but had no room for. These carry a real match
     // to the anchor, so they place properly once their tag is confirmed.
-    const pool = system.overflow.filter((n) => !n.tag).slice(0, 24);
+    const pool = system.overflow.filter((n) => !n.tag).slice(0, FOCUS_LIMIT);
     await Promise.all(
       pool.map(async (n) => {
         const tags = await api.tags(n.name).catch(() => []);
@@ -1129,12 +1190,12 @@ export function startExplorer(host: ExplorerHost): Explorer {
     const seeds = placed
       .filter((p) => p.node.tag === tag)
       .map((p) => p.node.name)
-      .slice(0, 6);
+      .slice(0, 10);
     const found = new Map<string, ExploreNode>();
     await Promise.all(
       seeds.map(async (seedName) => {
         const list = await api.similar(seedName).catch(() => []);
-        for (const entry of list.slice(0, 15)) {
+        for (const entry of list.slice(0, 20)) {
           const key = norm(entry.name);
           if (!key || shown.has(key) || found.has(key)) continue;
           found.set(key, describeExpansion(entry.name.trim()));
@@ -1143,7 +1204,7 @@ export function startExplorer(host: ExplorerHost): Explorer {
     );
     if (dead || token !== hop || focusedTag !== tag || !system) return;
 
-    const matches = [...direct, ...found.values()].slice(0, 14);
+    const matches = [...direct, ...found.values()].slice(0, FOCUS_LIMIT);
     if (!matches.length) return;
     expansion = matches;
     place(currentNodes());
@@ -1453,6 +1514,9 @@ export function startExplorer(host: ExplorerHost): Explorer {
   const observer = new ResizeObserver(resize);
   observer.observe(stage);
   resize();
+  if (host.entryFrom) {
+    initialAnchorFrom = { x: toWorldX(host.entryFrom.x), y: toWorldY(host.entryFrom.y) };
+  }
   void open(host.anchor);
 
   return {

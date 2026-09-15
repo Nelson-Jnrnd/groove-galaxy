@@ -76,6 +76,8 @@ const UPGRADE_AT = 34;
  */
 const MAX_CONCURRENT_IMAGES = 24;
 const FLY_MS = 520;
+/** How long Exploration Mode takes to fade/scale off the stage on the way out. */
+const EXPLORE_LEAVE_MS = 260;
 /** How much of the map is left visible outside a focused region (EXP-REQ-1). */
 const DIMMED = 0.12;
 /** Per-frame budget for layout passes, leaving the rest of the frame to draw. */
@@ -461,14 +463,46 @@ export function start(): void {
 
   let explorer: Explorer | null = null;
   let explorerToken = 0;
+  /** Set while a previous close's fade-out hasn't actually finished yet. */
+  let pendingLeaveFinish: (() => void) | null = null;
+  let explorerLeaveTimer = 0;
+
+  /** Cut a leave transition short and tear the old instance down right away
+   *  — used when a new exploration wants the stage before the last one's
+   *  fade-out timer has run out (review — closing then reopening fast). */
+  function flushExplorerLeave() {
+    if (!pendingLeaveFinish) return;
+    window.clearTimeout(explorerLeaveTimer);
+    stage.classList.remove("explore-leave");
+    const finish = pendingLeaveFinish;
+    pendingLeaveFinish = null;
+    finish();
+  }
 
   function closeExplorer() {
     explorerToken++;
     if (!explorer) return;
-    explorer.destroy();
+    const leaving = explorer;
     explorer = null;
-    delete stage.dataset.explore;
-    current?.setDormant(false);
+    // The map stays exactly as `setDormant` left it (EXP-REQ-19) and hidden
+    // for the whole fade — nothing underneath moves until Exploration Mode
+    // has actually finished receding, so the two never overlap mid-motion.
+    const finish = () => {
+      pendingLeaveFinish = null;
+      leaving.destroy();
+      delete stage.dataset.explore;
+      current?.setDormant(false);
+    };
+    if (matchMedia("(prefers-reduced-motion: reduce)").matches) {
+      finish();
+      return;
+    }
+    stage.classList.add("explore-leave");
+    pendingLeaveFinish = finish;
+    explorerLeaveTimer = window.setTimeout(() => {
+      stage.classList.remove("explore-leave");
+      finish();
+    }, EXPLORE_LEAVE_MS);
   }
 
   function originOf(view: MapView): ExploreOrigin {
@@ -490,9 +524,24 @@ export function start(): void {
       explorer.travelTo(state.explore);
       return;
     }
+    flushExplorerLeave();
 
     stage.dataset.explore = "true";
     map.setDormant(true);
+    // The anchor flies in from wherever this artist's own bubble was
+    // sitting on the map, if it had one, the same way it later slides
+    // between artists on every hop (review — "the clicked bubble becomes
+    // the anchor"); a soft fade/scale on the layer itself, toggled here
+    // rather than inside Exploration Mode, covers the rest of the entrance
+    // since the map underneath is plain `display: none` throughout, not a
+    // crossfade partner.
+    const entryFrom = map.screenPositionOf(state.explore) ?? undefined;
+    if (!matchMedia("(prefers-reduced-motion: reduce)").matches) {
+      stage.classList.add("explore-enter");
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => stage.classList.remove("explore-enter"));
+      });
+    }
     // §23 — the exploration module is fetched the first time somebody asks
     // to explore, the same way the timeline is.
     void import("./explorer.ts")
@@ -504,6 +553,7 @@ export function start(): void {
           period: state.period,
           origin: originOf(map),
           anchor: state.explore!,
+          entryFrom,
           artists: map.galaxyArtists,
           clusters: map.galaxyClusters,
           onTravel: (name) => {
@@ -517,6 +567,7 @@ export function start(): void {
       .catch(() => {
         if (token !== explorerToken) return;
         // Nothing to fall back to but the map itself, which is intact.
+        stage.classList.remove("explore-enter");
         delete stage.dataset.explore;
         map.setDormant(false);
         setCaption("Couldn't open exploration just now.");
@@ -758,6 +809,14 @@ export interface MapView {
   /** The Galaxy's artist set: what "in your Galaxy" means right now. */
   readonly galaxyArtists: Artist[];
   readonly galaxyClusters: Cluster[];
+  /**
+   * Where a named artist's bubble currently sits on screen, in stage
+   * pixels — so an exploration opening from it can fly its anchor in from
+   * that exact point instead of just appearing at the centre (review —
+   * "the clicked bubble becomes the anchor"). Null if this map has no such
+   * bubble (an artist explored straight from a URL, say).
+   */
+  screenPositionOf(name: string): { x: number; y: number; r: number } | null;
   /** Hand the stage to an exploration overlay, or take it back. */
   setDormant(on: boolean): void;
   /** Remember that an outside artist has been visited on this trail (§3). */
@@ -2644,6 +2703,13 @@ function boot(
 
     get galaxyClusters() {
       return clusters;
+    },
+
+    screenPositionOf(name) {
+      const key = norm(name);
+      const a = artists.find((x) => norm(x.name) === key);
+      if (!a) return null;
+      return { x: toScreenX(a.x), y: toScreenY(a.y), r: a.r * view.scale };
     },
 
     /**
