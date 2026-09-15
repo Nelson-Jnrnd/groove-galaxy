@@ -58,9 +58,9 @@ import { announce, lastFmArtistUrl } from "./map.ts";
 /* ─── geometry ───────────────────────────────────────────────────────── */
 
 /** Closest a neighbour is ever drawn to the anchor, in world units. */
-const INNER = 150;
+const INNER = 260;
 /** …and the farthest. Everything in between is similarity. */
-const OUTER = 430;
+const OUTER = 800;
 const ANCHOR_R = 54;
 /** Starting size, before a node's listener count has loaded. */
 const NODE_R = 20;
