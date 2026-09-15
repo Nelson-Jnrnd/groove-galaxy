@@ -32,6 +32,7 @@
  */
 import { norm, type Artist, type Cluster } from "../lib/build.ts";
 import {
+  allocateTagArcs,
   back,
   beginExploration,
   buildSystem,
@@ -42,10 +43,12 @@ import {
   previousAnchor,
   layoutSystem,
   travel,
+  UNTAGGED,
   type ExploreNode,
   type ExploreOrigin,
   type ExploreState,
   type System,
+  type TagArc,
   type TrailEntry,
 } from "../lib/explore.ts";
 import * as api from "../lib/lastfm.ts";
@@ -76,6 +79,8 @@ const NODE_R_MAX = 50;
 const LISTENERS_LOG_MIN = 3; // ~1,000 listeners
 const LISTENERS_LOG_MAX = 6.3; // ~2,000,000 listeners
 const TRANSITION_MS = 520;
+/** Breathing room between adjacent style wedges, each side, in radians. */
+const WEDGE_GAP = 0.05;
 const THUMB_PX = "64s";
 const DETAIL_PX = "174s";
 const UNCLUSTERED = "#6d6a62";
@@ -105,6 +110,16 @@ interface TagLabel {
   angle: number;
   /** Half of how much arc, in radians at its drawing radius, the widest line needs. */
   halfWidth: number;
+  /** Fading in (new tag) or out (a tag that just left the System). */
+  alpha: number;
+}
+
+/** One style wedge as it should actually be drawn this frame. */
+interface WedgeVisual {
+  tag: string;
+  start: number;
+  end: number;
+  alpha: number;
 }
 
 /**
@@ -137,6 +152,17 @@ function resolveLabelOverlap(labels: TagLabel[]) {
     }
     if (!moved) break;
   }
+}
+
+/**
+ * Inset a wedge's fill a little from its allocated edges, so adjacent
+ * slices show a visible gap instead of touching seam-to-seam. Clamped to a
+ * fraction of the wedge's own width so a tag with a thin allocation never
+ * gets inset past itself.
+ */
+function shrinkForGap(start: number, end: number): [number, number] {
+  const inset = Math.min(WEDGE_GAP, (end - start) * 0.2);
+  return [start + inset, end - inset];
 }
 
 /** A stable colour for a tag's wedge and label — same tag, same hue, always. */
@@ -337,6 +363,17 @@ export function startExplorer(host: ExplorerHost): Explorer {
   let stuck = false;
   let placed: Placed[] = [];
   let anchorPlaced: Placed | null = null;
+  /**
+   * This System's style wedges — the fixed allocation `layoutSystem` placed
+   * the nodes into, not anything derived from where they've since drifted.
+   * Two tags' shares of the circle never touch (`allocateTagArcs` hands out
+   * a strict partition), so however far real-time overlap resolution nudges
+   * a node around, the backgrounds drawn from this can never overlap
+   * (review — "slices overlap with the others").
+   */
+  let tagArcs: TagArc[] = [];
+  /** The wedges as they were a moment ago, so a change animates in angle-space (paired with `transition`) instead of popping straight to its new shape. */
+  let fromTagArcs = new Map<string, TagArc>();
   let hovered: Placed | null = null;
   let highlighted: Placed | null = null;
   /** Bumped on every hop; a slow similarity answer for an old one is dropped. */
@@ -449,51 +486,40 @@ export function startExplorer(host: ExplorerHost): Explorer {
     // "mark the grouping by tag with a background colour... like a pizza
     // slice"). Angle alone carries this (EXP-REQ-10a); radius stays
     // reserved for similarity.
-    const byTag = new Map<string, number[]>();
-    for (const p of placed) {
-      if (!p.node.tag) continue;
-      const q = at(p);
-      const angle = Math.atan2(q.y - centre.y, q.x - centre.x);
-      const list = byTag.get(p.node.tag);
-      if (list) list.push(angle);
-      else byTag.set(p.node.tag, [angle]);
-    }
+    //
+    // Wedges come from `tagArcs` — the same fixed partition `layoutSystem`
+    // placed the nodes into — not from the nodes' own live angles. Two
+    // tags' shares of the circle never touch, so however far real-time
+    // overlap resolution nudges a node around, the backgrounds themselves
+    // can never overlap (review — "slices overlap with the others"). A
+    // wedge that appears, disappears or resizes between layouts animates
+    // in angle-space, in step with the nodes' own transition.
     const wedgeOuter = (OUTER + NODE_R_MAX + 70) * view.scale;
     const labelRadius = wedgeOuter * 0.9;
     ctx.font = TAG_FONT;
     const labels: TagLabel[] = [];
-    for (const [tag, angles] of byTag) {
-      let lo = angles[0];
-      let hi = angles[0];
-      for (const raw of angles) {
-        let a = raw;
-        while (a < lo - Math.PI) a += Math.PI * 2;
-        while (a > lo + Math.PI) a -= Math.PI * 2;
-        if (a < lo) lo = a;
-        if (a > hi) hi = a;
-      }
-      const pad = 0.16;
-      const start = lo - pad;
-      const end = hi + pad;
-      const hue = tagHue(tag);
-      const active = tag === focusedTag;
+    for (const w of currentWedges(t)) {
+      const [fillStart, fillEnd] = shrinkForGap(w.start, w.end);
+      const hue = tagHue(w.tag);
+      const active = w.tag === focusedTag;
       ctx.beginPath();
       ctx.moveTo(cx, cy);
-      ctx.arc(cx, cy, wedgeOuter, start, end);
+      ctx.arc(cx, cy, wedgeOuter, fillStart, fillEnd);
       ctx.closePath();
-      ctx.fillStyle = `hsla(${hue}, 50%, 60%, ${active ? 0.12 : 0.055})`;
+      ctx.fillStyle = `hsla(${hue}, 50%, 60%, ${(active ? 0.12 : 0.055) * w.alpha})`;
       ctx.fill();
 
       // Never wider than the wedge itself, with a floor so a razor-thin
       // slice still gets a readable line to wrap onto.
-      const lines = wrapArcText(ctx, tag, labelRadius, Math.max(end - start, 0.4));
+      const lines = wrapArcText(ctx, w.tag, labelRadius, Math.max(fillEnd - fillStart, 0.4));
       const widest = Math.max(...lines.map((l) => ctx.measureText(l).width));
       labels.push({
-        tag,
+        tag: w.tag,
         lines,
         hue,
-        angle: (start + end) / 2,
+        angle: (fillStart + fillEnd) / 2,
         halfWidth: (widest / 2 + 8) / labelRadius,
+        alpha: w.alpha,
       });
     }
     resolveLabelOverlap(labels);
@@ -508,8 +534,10 @@ export function startExplorer(host: ExplorerHost): Explorer {
     }));
     for (const l of labels) {
       const active = l.tag === focusedTag;
+      ctx.globalAlpha = l.alpha;
       drawArcText(ctx, cx, cy, l.lines, l.angle, labelRadius, l.hue, active);
     }
+    ctx.globalAlpha = 1;
 
     // Orbits, not spokes: distance from the anchor is still similarity to
     // it (EXP-REQ-10), drawn as the ring a node travels rather than a line
@@ -798,6 +826,18 @@ export function startExplorer(host: ExplorerHost): Explorer {
   function place(nodes: ExploreNode[]) {
     const prevByName = new Map(placed.map((p) => [norm(p.node.name), p]));
     const points = layoutSystem(nodes, { inner: INNER, outer: OUTER, focusedTag });
+
+    // Same partition `layoutSystem` used internally to place the points
+    // above, kept here so the wedges drawn behind them can match exactly
+    // instead of being re-derived from wherever the nodes end up.
+    fromTagArcs = new Map(tagArcs.map((a) => [a.tag, a]));
+    const counts = new Map<string, number>();
+    for (const node of nodes) {
+      const key = node.tag ?? UNTAGGED;
+      counts.set(key, (counts.get(key) ?? 0) + 1);
+    }
+    tagArcs = allocateTagArcs(counts, focusedTag);
+
     placed = nodes.map((node, i) => {
       const prev = prevByName.get(norm(node.name));
       return {
@@ -814,6 +854,41 @@ export function startExplorer(host: ExplorerHost): Explorer {
     transition = reducedMotion() ? 1 : 0;
     transitionFrom = performance.now();
     draw();
+  }
+
+  /**
+   * This frame's wedges, `tagArcs` blended toward `fromTagArcs` by however
+   * far the transition has got (`t`, already eased). A tag with no
+   * predecessor grows in place instead of sliding, fading in via alpha
+   * instead — the same treatment a brand-new node gets (`fresh`) — and a
+   * tag that just dropped out keeps drawing at its last shape while it
+   * fades out, rather than disappearing mid-frame.
+   */
+  function currentWedges(t: number): WedgeVisual[] {
+    const out: WedgeVisual[] = [];
+    const seen = new Set<string>();
+    for (const arc of tagArcs) {
+      if (arc.tag === UNTAGGED) continue;
+      seen.add(arc.tag);
+      const from = fromTagArcs.get(arc.tag);
+      if (from && t < 1) {
+        out.push({
+          tag: arc.tag,
+          start: from.start + (arc.start - from.start) * t,
+          end: from.end + (arc.end - from.end) * t,
+          alpha: 1,
+        });
+      } else {
+        out.push({ tag: arc.tag, start: arc.start, end: arc.end, alpha: from ? 1 : t });
+      }
+    }
+    if (t < 1) {
+      for (const [tag, arc] of fromTagArcs) {
+        if (seen.has(tag) || tag === UNTAGGED) continue;
+        out.push({ tag, start: arc.start, end: arc.end, alpha: 1 - t });
+      }
+    }
+    return out;
   }
 
   function show(next: System) {
@@ -882,6 +957,7 @@ export function startExplorer(host: ExplorerHost): Explorer {
    */
   function resolveOverlaps() {
     const margin = 6;
+    const arcByTag = new Map(tagArcs.map((a) => [a.tag, a]));
     for (let pass = 0; pass < 40; pass++) {
       let moved = false;
       for (let i = 0; i < placed.length; i++) {
@@ -896,8 +972,8 @@ export function startExplorer(host: ExplorerHost): Explorer {
           const push = (min - dist) / 2 + 0.5;
           const ux = dx / dist;
           const uy = dy / dist;
-          nudge(a, -ux * push, -uy * push);
-          nudge(b, ux * push, uy * push);
+          nudge(a, -ux * push, -uy * push, arcByTag.get(a.node.tag ?? UNTAGGED));
+          nudge(b, ux * push, uy * push, arcByTag.get(b.node.tag ?? UNTAGGED));
           moved = true;
         }
       }
@@ -905,8 +981,17 @@ export function startExplorer(host: ExplorerHost): Explorer {
     }
   }
 
-  /** Move a placed node by a vector, mostly along its orbit, a little across it. */
-  function nudge(p: Placed, vx: number, vy: number) {
+  /**
+   * Move a placed node by a vector, mostly along its orbit, a little across
+   * it. When `arc` is given, the result is clamped back inside it — a node
+   * sliding to make room for another must stay in the style wedge it was
+   * placed into rather than drifting into a neighbour's (review — "either
+   * by moving the orbit or sliding them around their own orbit", not out of
+   * it); `layoutSystem`'s own initial spread already starts every node
+   * inside its own arc, so this only ever has to correct drift this pass
+   * introduces.
+   */
+  function nudge(p: Placed, vx: number, vy: number, arc?: TagArc) {
     const r = Math.hypot(p.x, p.y) || 1e-6;
     const rx = p.x / r;
     const ry = p.y / r;
@@ -914,8 +999,29 @@ export function startExplorer(host: ExplorerHost): Explorer {
     const ty = rx;
     const radial = vx * rx + vy * ry;
     const tangent = vx * tx + vy * ty;
-    p.x += tx * tangent + rx * radial * 0.4;
-    p.y += ty * tangent + ry * radial * 0.4;
+    let nx = p.x + tx * tangent + rx * radial * 0.4;
+    let ny = p.y + ty * tangent + ry * radial * 0.4;
+    if (arc) {
+      const radius = Math.hypot(nx, ny) || 1e-6;
+      const raw = Math.atan2(ny, nx);
+      // The arc's own bounds are unwrapped, cumulative radians (they can run
+      // well past ±π), so try every lap of `raw` that could plausibly be
+      // "inside" and keep whichever needs the least correction.
+      let angle = raw;
+      let bestDist = Infinity;
+      for (const candidate of [raw - Math.PI * 2, raw, raw + Math.PI * 2]) {
+        const clamped = clamp(candidate, arc.start, arc.end);
+        const dist = Math.abs(candidate - clamped);
+        if (dist < bestDist) {
+          bestDist = dist;
+          angle = clamped;
+        }
+      }
+      nx = Math.cos(angle) * radius;
+      ny = Math.sin(angle) * radius;
+    }
+    p.x = nx;
+    p.y = ny;
   }
 
   const snapshot = () => placed.map((p) => ({ x: p.x, y: p.y }));
