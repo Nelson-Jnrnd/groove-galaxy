@@ -1100,7 +1100,7 @@ p { margin: 0; }
 .detail__explore:hover { background: var(--gold-soft); border-color: var(--gold-soft); }
 
 /* ---------- System View ---------- */
-.stage__canvas--explore { position: absolute; inset: 0; z-index: 4; opacity: 1; transform: scale(1); }
+.stage__canvas--explore { position: absolute; inset: 0; z-index: 4; opacity: 1; }
 /* While exploring, the Galaxy's own furniture steps aside — but the map
    itself is never torn down, so coming back is instant and unchanged. */
 .stage[data-explore="true"] #canvas,
@@ -1111,22 +1111,25 @@ p { margin: 0; }
 
 /* Entering and leaving Exploration Mode are the same camera move as
    opening onto a new artist's own bubble already is (`explorer.ts`'s
-   `anchorPlaced` transition) — the layer itself fades and settles by a
-   touch, rather than the whole view just appearing or vanishing (review —
-   "transition to and from the explore page could be improved"). The map
-   underneath stays plain `display: none` throughout either way: it is
-   never a crossfade partner, just what is revealed once Exploration Mode
-   has finished moving. */
+   `anchorPlaced` transition) — the layer itself fades in and out, rather
+   than the whole view just appearing or vanishing (review — "transition to
+   and from the explore page could be improved"). Opacity only, not a
+   transform: scaling a full-bleed canvas forces a layer promotion right as
+   the animation starts, which is exactly the dropped frame this was
+   getting (review — "stuttering in the animation"). The map underneath
+   stays plain `display: none` throughout either way: it is never a
+   crossfade partner, just what is revealed once Exploration Mode has
+   finished moving. */
 .stage.explore-enter .stage__canvas--explore,
-.stage.explore-leave .stage__canvas--explore {
-  opacity: 0;
-  transform: scale(0.96);
-}
+.stage.explore-leave .stage__canvas--explore,
 .stage.explore-enter .explore,
 .stage.explore-leave .explore { opacity: 0; }
 @media (prefers-reduced-motion: no-preference) {
-  .stage__canvas--explore { transition: opacity 0.26s ease, transform 0.26s ease; }
-  .explore { transition: opacity 0.26s ease; }
+  .stage__canvas--explore,
+  .explore {
+    transition: opacity 0.26s ease;
+    will-change: opacity;
+  }
 }
 
 .explore {
