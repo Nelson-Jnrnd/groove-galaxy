@@ -865,7 +865,7 @@ export function startExplorer(host: ExplorerHost): Explorer {
 
     let similar: api.SimilarArtist[];
     try {
-      similar = await api.similar(anchorName);
+      similar = await api.similar(anchorName, { urgent: true });
     } catch {
       // §22 — a failed lookup never takes the exploration down with it.
       if (dead || token !== hop) return;
@@ -1269,7 +1269,7 @@ export function startExplorer(host: ExplorerHost): Explorer {
     const pool = system.overflow.filter((n) => !n.tag).slice(0, FOCUS_LIMIT);
     await Promise.all(
       pool.map(async (n) => {
-        const tags = await api.tags(n.name).catch(() => []);
+        const tags = await api.tags(n.name, { urgent: true }).catch(() => []);
         if (tags.length) n.tag = tags[0];
       }),
     );
@@ -1301,7 +1301,7 @@ export function startExplorer(host: ExplorerHost): Explorer {
     const found = new Map<string, ExploreNode>();
     await Promise.all(
       seeds.map(async (seedName) => {
-        const list = await api.similar(seedName).catch(() => []);
+        const list = await api.similar(seedName, { urgent: true }).catch(() => []);
         for (const entry of list.slice(0, 20)) {
           const key = norm(entry.name);
           if (!key || shown.has(key) || found.has(key)) continue;
@@ -1361,7 +1361,7 @@ export function startExplorer(host: ExplorerHost): Explorer {
             // every time a System's artwork was new — exactly the dropped
             // frames review reported ("doesn't happen once it's loaded").
             if (images.has(key)) return;
-            const url = node.image || (await api.artwork(node.name).catch(() => ""));
+            const url = node.image || (await api.artwork(node.name, { urgent: true }).catch(() => ""));
             if (dead || token !== hop || !url) return;
             const img = new Image();
             img.referrerPolicy = "no-referrer";
@@ -1377,13 +1377,13 @@ export function startExplorer(host: ExplorerHost): Explorer {
           })(),
           (async () => {
             if (node.listeners !== undefined) return;
-            const value = await api.listeners(node.name).catch(() => 0);
+            const value = await api.listeners(node.name, { urgent: true }).catch(() => 0);
             if (dead || token !== hop) return;
             applyListeners(node, value);
           })(),
           (async () => {
             if (node.tag) return;
-            const found = await api.tags(node.name).catch(() => []);
+            const found = await api.tags(node.name, { urgent: true }).catch(() => []);
             if (dead || token !== hop || !found.length) return;
             applyTag(node, found[0]);
           })(),
