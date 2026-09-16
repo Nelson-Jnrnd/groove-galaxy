@@ -1257,19 +1257,27 @@ export function startExplorer(host: ExplorerHost): Explorer {
         const key = norm(node.name);
         await Promise.all([
           (async () => {
+            // `decode()` resolves only once the bitmap is fully decoded and
+            // free to paint — unlike `onload`, which fires once the bytes
+            // are in but leaves the actual decode for whenever the image is
+            // first drawn. Left to `onload`, that decode was landing inside
+            // whichever transition frame happened to draw this node first,
+            // every time a System's artwork was new — exactly the dropped
+            // frames review reported ("doesn't happen once it's loaded").
             if (images.has(key)) return;
             const url = node.image || (await api.artwork(node.name).catch(() => ""));
             if (dead || token !== hop || !url) return;
             const img = new Image();
-            img.decoding = "async";
             img.referrerPolicy = "no-referrer";
-            img.onload = () => {
-              if (dead || !img.naturalWidth) return;
-              images.set(key, img);
-              draw();
-            };
-            img.onerror = () => {};
             img.src = sized(url, node === anchorPlaced?.node ? DETAIL_PX : THUMB_PX);
+            try {
+              await img.decode();
+            } catch {
+              return;
+            }
+            if (dead || token !== hop || !img.naturalWidth) return;
+            images.set(key, img);
+            draw();
           })(),
           (async () => {
             if (node.listeners !== undefined) return;
