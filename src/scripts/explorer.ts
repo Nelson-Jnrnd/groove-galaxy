@@ -443,7 +443,14 @@ export function startExplorer(host: ExplorerHost): Explorer {
   function resize() {
     if (!canvas || !ctx) return;
     const rect = stage.getBoundingClientRect();
-    dpr = Math.min(window.devicePixelRatio || 1, 2);
+    // Capped well below the map's own 2 — every wedge, label and node here
+    // redraws from scratch on *every* frame of *every* transition, several
+    // seconds after a hop as enrichment trickles in, not just on demand
+    // like the map's; at a HiDPI 2x backing store that is 4x the pixels of
+    // a 1x screen to rasterise per frame, and on real hardware that is
+    // exactly the dropped-frames-mid-slide review report. 1.5x keeps most
+    // of the sharpness a retina display buys and cuts that cost by ~44%.
+    dpr = Math.min(window.devicePixelRatio || 1, 1.5);
     width = Math.max(rect.width, 1);
     height = Math.max(rect.height, 1);
     canvas.width = Math.round(width * dpr);
@@ -555,6 +562,10 @@ export function startExplorer(host: ExplorerHost): Explorer {
       radius: labelRadius / view.scale,
     }));
     for (const l of labels) {
+      // A label mid-fade is still a full per-character draw for something
+      // essentially invisible — skip it outright once there's nothing left
+      // to see (review — "frames dropping mid-slide").
+      if (l.alpha < 0.02) continue;
       const active = l.tag === focusedTag;
       ctx.globalAlpha = l.alpha;
       drawArcText(ctx, cx, cy, l.lines, l.angle, labelRadius, l.hue, active);
