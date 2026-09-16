@@ -87,10 +87,17 @@ const TRANSITION_MS = 520;
  * was restarting the whole System's transition every time, so the picture
  * never actually finished settling for as long as artists were still
  * arriving (review — "it's the way we're loading things, not the
- * animation"). Batching arrivals that land within this window into one
- * transition instead turns dozens of restarts into a handful.
+ * animation" / "it's like it's loading 2 to 3 times"). A fixed batch
+ * window still fires once per window for as long as arrivals keep
+ * landing, which on a slow connection is still several visible re-settles
+ * — so this is a trailing debounce instead: each arrival pushes the flush
+ * another `ENRICHMENT_QUIET_MS` out, meaning a steady trickle collapses
+ * into the *one* flush once it actually stops, capped by
+ * `ENRICHMENT_MAX_WAIT_MS` so a connection that never goes quiet still
+ * settles periodically rather than waiting forever.
  */
-const ENRICHMENT_BATCH_MS = 500;
+const ENRICHMENT_QUIET_MS = 400;
+const ENRICHMENT_MAX_WAIT_MS = 1800;
 /** Breathing room between adjacent style wedges, each side, in radians. */
 const WEDGE_GAP = 0.05;
 /**
@@ -398,9 +405,11 @@ export function startExplorer(host: ExplorerHost): Explorer {
   let initialAnchorFrom: Point | null = null;
   /** Batches size changes from `applyListeners` into one `settleFrom` call. */
   let resettleTimer = 0;
+  let resettleDeadline = 0;
   let resettleFrom: Point[] | null = null;
   /** Batches tag confirmations from `applyTag` into one `place` call. */
   let relayoutTimer = 0;
+  let relayoutDeadline = 0;
   /**
    * This System's style wedges — the fixed allocation `layoutSystem` placed
    * the nodes into, not anything derived from where they've since drifted.
@@ -1146,11 +1155,34 @@ export function startExplorer(host: ExplorerHost): Explorer {
   }
 
   /**
+   * Schedules `run` a debounced `ENRICHMENT_QUIET_MS` after the *last* call
+   * to reach here, not the first — so a steady trickle of arrivals (typical
+   * over a real, slow connection) collapses into the one flush once it
+   * actually stops, rather than firing once per fixed window the whole
+   * time enrichment keeps landing. `ENRICHMENT_MAX_WAIT_MS` caps how long a
+   * trickle that never quite stops can put it off.
+   */
+  function debounceEnrichment(
+    timer: number,
+    deadline: number,
+    run: () => void,
+  ): { timer: number; deadline: number } {
+    const now = performance.now();
+    const nextDeadline = timer ? deadline : now + ENRICHMENT_MAX_WAIT_MS;
+    clearTimeout(timer);
+    const wait = Math.min(ENRICHMENT_QUIET_MS, Math.max(0, nextDeadline - now));
+    const nextTimer = window.setTimeout(run, wait);
+    return { timer: nextTimer, deadline: nextDeadline };
+  }
+
+  /**
    * A node's listener count just arrived — resize it and settle any overlap
    * that opens up. Several of these typically land within milliseconds of
    * each other (one per node, as each of a hop's similarity-list lookups
-   * resolves); batched into one `settleFrom` per `ENRICHMENT_BATCH_MS`
-   * window rather than restarting the transition per node.
+   * resolves), and on a slow connection can keep trickling in for seconds —
+   * debounced into as few `settleFrom` calls as possible rather than
+   * restarting the transition per node (review — "it's like it's loading 2
+   * to 3 times").
    */
   function applyListeners(node: ExploreNode, value: number) {
     node.listeners = value;
@@ -1158,15 +1190,17 @@ export function startExplorer(host: ExplorerHost): Explorer {
     const p = placed.find((q) => q.node === node);
     if (!p) return;
     p.r = sizeForListeners(value);
-    if (!resettleTimer) {
-      resettleFrom = snapshot();
-      resettleTimer = window.setTimeout(() => {
+    if (!resettleTimer) resettleFrom = snapshot();
+    ({ timer: resettleTimer, deadline: resettleDeadline } = debounceEnrichment(
+      resettleTimer,
+      resettleDeadline,
+      () => {
         resettleTimer = 0;
         const before = resettleFrom!;
         resettleFrom = null;
         settleFrom(before);
-      }, ENRICHMENT_BATCH_MS);
-    }
+      },
+    ));
   }
 
   /**
@@ -1180,8 +1214,8 @@ export function startExplorer(host: ExplorerHost): Explorer {
    * the open tag after the fact would never reappear.
    *
    * Tags trickle in one lookup at a time same as listener counts, and each
-   * one can reshuffle every wedge's share of the circle — batched into one
-   * `place` per `ENRICHMENT_BATCH_MS` window for the same reason.
+   * one can reshuffle every wedge's share of the circle — debounced into as
+   * few `place` calls as possible for the same reason.
    */
   function applyTag(node: ExploreNode, tag: string) {
     node.tag = tag;
@@ -1189,12 +1223,14 @@ export function startExplorer(host: ExplorerHost): Explorer {
     if (!system) return;
     const known = system.neighbours.includes(node) || expansion.includes(node);
     if (!known) return;
-    if (!relayoutTimer) {
-      relayoutTimer = window.setTimeout(() => {
+    ({ timer: relayoutTimer, deadline: relayoutDeadline } = debounceEnrichment(
+      relayoutTimer,
+      relayoutDeadline,
+      () => {
         relayoutTimer = 0;
         place(currentNodes());
-      }, ENRICHMENT_BATCH_MS);
-    }
+      },
+    ));
   }
 
   /**
