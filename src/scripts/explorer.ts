@@ -932,8 +932,13 @@ export function startExplorer(host: ExplorerHost): Explorer {
 
     // Same partition `layoutSystem` used internally to place the points
     // above, kept here so the wedges drawn behind them can match exactly
-    // instead of being re-derived from wherever the nodes end up.
-    fromTagArcs = new Map(tagArcs.map((a) => [a.tag, a]));
+    // instead of being re-derived from wherever the nodes end up. Snapshots
+    // where each wedge *currently* is, mid-transition or not — the same
+    // reason `currentPos` exists for nodes: using the stale, already-final
+    // `tagArcs` here instead snapped every wedge back to its last target
+    // before re-easing from there, every time a hop or a piece of
+    // enrichment retriggered a layout while a wedge was still moving.
+    fromTagArcs = currentTagArcs();
     const counts = new Map<string, number>();
     for (const node of layoutNodes) {
       const key = node.tag ?? UNTAGGED;
@@ -958,6 +963,36 @@ export function startExplorer(host: ExplorerHost): Explorer {
     transition = reducedMotion() ? 1 : 0;
     transitionFrom = performance.now();
     draw();
+  }
+
+  /**
+   * Where each of *this* System's wedges visually is right now, blending
+   * `tagArcs` toward `fromTagArcs` the same way `currentWedges` does for
+   * drawing — called just before both are overwritten by a new layout, so
+   * the outgoing shape it captures is the one actually on screen instead of
+   * whatever the previous transition was heading towards. A tag that's
+   * mid-fade-out (in `fromTagArcs` but not the current `tagArcs`) keeps its
+   * last real position; reappearing inside the same brief window it's
+   * still fading is rare enough not to chase.
+   */
+  function currentTagArcs(): Map<string, TagArc> {
+    const t = easeOut(clamp((performance.now() - transitionFrom) / TRANSITION_MS, 0, 1));
+    const out = new Map<string, TagArc>();
+    for (const arc of tagArcs) {
+      if (arc.tag === UNTAGGED) continue;
+      const from = fromTagArcs.get(arc.tag);
+      out.set(
+        arc.tag,
+        from && t < 1
+          ? {
+              tag: arc.tag,
+              start: from.start + (arc.start - from.start) * t,
+              end: from.end + (arc.end - from.end) * t,
+            }
+          : arc,
+      );
+    }
+    return out;
   }
 
   /**
