@@ -526,22 +526,21 @@ export function start(): void {
     }
     flushExplorerLeave();
 
+    const reduceMotion = matchMedia("(prefers-reduced-motion: reduce)").matches;
     stage.dataset.explore = "true";
     map.setDormant(true);
     // The anchor flies in from wherever this artist's own bubble was
     // sitting on the map, if it had one, the same way it later slides
     // between artists on every hop (review — "the clicked bubble becomes
-    // the anchor"); a soft fade/scale on the layer itself, toggled here
-    // rather than inside Exploration Mode, covers the rest of the entrance
-    // since the map underneath is plain `display: none` throughout, not a
-    // crossfade partner.
+    // the anchor"); a soft fade on the layer itself, toggled here rather
+    // than inside Exploration Mode, covers the rest of the entrance since
+    // the map underneath is plain `display: none` throughout, not a
+    // crossfade partner. Held until `startExplorer` has actually sized its
+    // canvas — starting the fade any earlier caught that one-off layout
+    // cost (a fresh canvas's backing store) mid-motion instead of behind
+    // still-transparent pixels (review — "stuttering in the animation").
     const entryFrom = map.screenPositionOf(state.explore) ?? undefined;
-    if (!matchMedia("(prefers-reduced-motion: reduce)").matches) {
-      stage.classList.add("explore-enter");
-      requestAnimationFrame(() => {
-        requestAnimationFrame(() => stage.classList.remove("explore-enter"));
-      });
-    }
+    if (!reduceMotion) stage.classList.add("explore-enter");
     // §23 — the exploration module is fetched the first time somebody asks
     // to explore, the same way the timeline is.
     void import("./explorer.ts")
@@ -563,6 +562,11 @@ export function start(): void {
           onBack: () => history.back(),
           onExit: () => go({ ...wanted, explore: null }),
         });
+        if (!reduceMotion) {
+          requestAnimationFrame(() => {
+            requestAnimationFrame(() => stage.classList.remove("explore-enter"));
+          });
+        }
       })
       .catch(() => {
         if (token !== explorerToken) return;
