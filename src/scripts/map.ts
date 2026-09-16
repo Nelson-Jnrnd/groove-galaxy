@@ -2604,7 +2604,13 @@ function boot(
   canvas.addEventListener("wheel", stopFollowing, { passive: true, signal });
 
   function settleFrame() {
-    if (!settling || dead) return;
+    // While an exploration overlay has the stage, this map is never drawn
+    // (EXP-REQ-19) — but without this check the layout would keep quietly
+    // stepping and redrawing underneath it regardless, a second animation
+    // loop competing with Exploration Mode's own for every frame of main
+    // thread it can get (review — "stuttering in the animation"). Picks up
+    // again, mid-cooldown, the moment the map is no longer dormant.
+    if (!settling || dead || dormant) return;
     layout.step(LAYOUT_BUDGET_MS);
     layout.centre();
     syncPositions();
@@ -2729,6 +2735,7 @@ function boot(
         setFrontierHover(null);
         stopAnimation();
       } else {
+        if (settling) requestAnimationFrame(settleFrame);
         draw();
       }
     },
