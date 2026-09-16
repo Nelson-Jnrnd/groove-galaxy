@@ -80,6 +80,17 @@ const NODE_R_MAX = 50;
 const LISTENERS_LOG_MIN = 3; // ~1,000 listeners
 const LISTENERS_LOG_MAX = 6.3; // ~2,000,000 listeners
 const TRANSITION_MS = 520;
+/**
+ * Per-node enrichment (artwork, listener counts, tags) arrives one network
+ * response at a time, never together — on a real, jittery connection that
+ * can spread over several seconds. Reacting to each arrival immediately
+ * was restarting the whole System's transition every time, so the picture
+ * never actually finished settling for as long as artists were still
+ * arriving (review — "it's the way we're loading things, not the
+ * animation"). Batching arrivals that land within this window into one
+ * transition instead turns dozens of restarts into a handful.
+ */
+const ENRICHMENT_BATCH_MS = 500;
 /** Breathing room between adjacent style wedges, each side, in radians. */
 const WEDGE_GAP = 0.05;
 /**
@@ -385,6 +396,11 @@ export function startExplorer(host: ExplorerHost): Explorer {
    * a neighbour's position on every later hop (`show`'s own `anchorFrom`).
    */
   let initialAnchorFrom: Point | null = null;
+  /** Batches size changes from `applyListeners` into one `settleFrom` call. */
+  let resettleTimer = 0;
+  let resettleFrom: Point[] | null = null;
+  /** Batches tag confirmations from `applyTag` into one `place` call. */
+  let relayoutTimer = 0;
   /**
    * This System's style wedges — the fixed allocation `layoutSystem` placed
    * the nodes into, not anything derived from where they've since drifted.
@@ -475,6 +491,21 @@ export function startExplorer(host: ExplorerHost): Explorer {
   let rafId = 0;
   let transitionFrom = 0;
   let transition = 1;
+
+  /**
+   * Where a node visually is right now, whether or not a transition is
+   * still in flight — the only correct place for a *new* transition to
+   * continue from. Restarting from the stale, already-reached `x/y`
+   * instead (as `place`/`settleFrom` used to) snapped every node back to
+   * its last target before re-easing from there, which reads as a visible
+   * stutter each time a hop or a piece of enrichment retriggers a
+   * transition (review — "it's the way we're loading things, not the
+   * animation").
+   */
+  function currentPos(p: Placed): Point {
+    const t = easeOut(clamp((performance.now() - transitionFrom) / TRANSITION_MS, 0, 1));
+    return { x: p.fromX + (p.x - p.fromX) * t, y: p.fromY + (p.y - p.fromY) * t };
+  }
 
   function draw() {
     dirty = true;
@@ -869,6 +900,15 @@ export function startExplorer(host: ExplorerHost): Explorer {
    * inputs changed", so they all go through here.
    */
   function place(nodes: ExploreNode[]) {
+    // Whatever a pending batched settle/relayout was waiting to apply to
+    // `placed` no longer matches it once this runs — it would otherwise
+    // fire later against an array it was never snapshotted from.
+    clearTimeout(resettleTimer);
+    resettleTimer = 0;
+    resettleFrom = null;
+    clearTimeout(relayoutTimer);
+    relayoutTimer = 0;
+
     const prevByName = new Map(placed.map((p) => [norm(p.node.name), p]));
     // A focused tag owns the whole circle, not just its own members' real
     // tags — an artist pulled in by second-degree similarity can resolve to
@@ -894,13 +934,14 @@ export function startExplorer(host: ExplorerHost): Explorer {
 
     placed = nodes.map((node, i) => {
       const prev = prevByName.get(norm(node.name));
+      const prevNow = prev ? currentPos(prev) : null;
       return {
         node,
         x: points[i].x,
         y: points[i].y,
         r: prev ? prev.r : NODE_R,
-        fromX: prev ? prev.x : points[i].x,
-        fromY: prev ? prev.y : points[i].y,
+        fromX: prevNow ? prevNow.x : points[i].x,
+        fromY: prevNow ? prevNow.y : points[i].y,
         fresh: !prev,
       };
     });
@@ -947,12 +988,9 @@ export function startExplorer(host: ExplorerHost): Explorer {
 
   function show(next: System) {
     const previousPositions = new Map<string, { x: number; y: number }>();
-    for (const p of placed) previousPositions.set(norm(p.node.name), { x: p.x, y: p.y });
+    for (const p of placed) previousPositions.set(norm(p.node.name), currentPos(p));
     if (anchorPlaced) {
-      previousPositions.set(norm(anchorPlaced.node.name), {
-        x: anchorPlaced.x,
-        y: anchorPlaced.y,
-      });
+      previousPositions.set(norm(anchorPlaced.node.name), currentPos(anchorPlaced));
     }
     // On the very first System, there is no previous node to slide from —
     // except the bubble this exploration was opened from, if there was one
@@ -1089,7 +1127,7 @@ export function startExplorer(host: ExplorerHost): Explorer {
     p.y = ny;
   }
 
-  const snapshot = () => placed.map((p) => ({ x: p.x, y: p.y }));
+  const snapshot = () => placed.map((p) => currentPos(p));
 
   /** Resolve overlaps against a pre-change snapshot, then transition into it. */
   function settleFrom(before: { x: number; y: number }[]) {
@@ -1107,15 +1145,28 @@ export function startExplorer(host: ExplorerHost): Explorer {
     draw();
   }
 
-  /** A node's listener count just arrived — resize it and settle any overlap that opens up. */
+  /**
+   * A node's listener count just arrived — resize it and settle any overlap
+   * that opens up. Several of these typically land within milliseconds of
+   * each other (one per node, as each of a hop's similarity-list lookups
+   * resolves); batched into one `settleFrom` per `ENRICHMENT_BATCH_MS`
+   * window rather than restarting the transition per node.
+   */
   function applyListeners(node: ExploreNode, value: number) {
     node.listeners = value;
     if (node === anchorPlaced?.node) return; // the star's size never depends on this
     const p = placed.find((q) => q.node === node);
     if (!p) return;
-    const before = snapshot();
     p.r = sizeForListeners(value);
-    settleFrom(before);
+    if (!resettleTimer) {
+      resettleFrom = snapshot();
+      resettleTimer = window.setTimeout(() => {
+        resettleTimer = 0;
+        const before = resettleFrom!;
+        resettleFrom = null;
+        settleFrom(before);
+      }, ENRICHMENT_BATCH_MS);
+    }
   }
 
   /**
@@ -1127,6 +1178,10 @@ export function startExplorer(host: ExplorerHost): Explorer {
    * (`currentNodes` filters it out), so this checks the System's full
    * roster, not just what's currently drawn, or a neighbour confirming
    * the open tag after the fact would never reappear.
+   *
+   * Tags trickle in one lookup at a time same as listener counts, and each
+   * one can reshuffle every wedge's share of the circle — batched into one
+   * `place` per `ENRICHMENT_BATCH_MS` window for the same reason.
    */
   function applyTag(node: ExploreNode, tag: string) {
     node.tag = tag;
@@ -1134,7 +1189,12 @@ export function startExplorer(host: ExplorerHost): Explorer {
     if (!system) return;
     const known = system.neighbours.includes(node) || expansion.includes(node);
     if (!known) return;
-    place(currentNodes());
+    if (!relayoutTimer) {
+      relayoutTimer = window.setTimeout(() => {
+        relayoutTimer = 0;
+        place(currentNodes());
+      }, ENRICHMENT_BATCH_MS);
+    }
   }
 
   /**
@@ -1550,6 +1610,10 @@ export function startExplorer(host: ExplorerHost): Explorer {
       observer.disconnect();
       if (rafId) cancelAnimationFrame(rafId);
       rafId = 0;
+      clearTimeout(resettleTimer);
+      resettleTimer = 0;
+      clearTimeout(relayoutTimer);
+      relayoutTimer = 0;
       images.clear();
       placed = [];
       anchorPlaced = null;
