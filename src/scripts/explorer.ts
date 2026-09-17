@@ -98,6 +98,24 @@ const TRANSITION_MS = 520;
  */
 const ENRICHMENT_QUIET_MS = 400;
 const ENRICHMENT_MAX_WAIT_MS = 1800;
+/**
+ * A neighbour the visitor's own Galaxy has never seen (the common case —
+ * exploring is largely *for* finding those) carries no tag from `describe`;
+ * it only gets one once `loadEnrichment`'s lazy per-node fetch resolves,
+ * same as its artwork or listener count. But a tag is not like those two:
+ * `layoutSystem` groups nodes into wedges *by* tag, so the System's very
+ * first paint — built from whatever tags happened to be known already —
+ * is frequently untagged or one lopsided wedge, and then completely
+ * reshuffles into its real style wedges the moment those lookups land.
+ * Every other piece of enrichment only redraws a node in place; this one
+ * moves everyone, which is exactly the second, unrelated-looking "reload"
+ * a screen recording caught (§review — three explorations, two visibly
+ * distinct settles each). So this one field is worth blocking the first
+ * reveal on, up to a cap: past `TAG_PREFETCH_TIMEOUT_MS`, `open` shows
+ * whatever tags did resolve and leaves the rest to the normal lazy path,
+ * rather than holding the whole System hostage to the slowest artist.
+ */
+const TAG_PREFETCH_TIMEOUT_MS = 900;
 /** Breathing room between adjacent style wedges, each side, in radians. */
 const WEDGE_GAP = 0.05;
 /**
@@ -883,7 +901,38 @@ export function startExplorer(host: ExplorerHost): Explorer {
       explored: state.explored,
       previous: previous ? previous.name : null,
     });
+    await prefetchTags(next.neighbours);
+    if (dead || token !== hop) return;
     show(next);
+  }
+
+  /**
+   * Give `layoutSystem` a real tag for as many of `nodes` as will resolve
+   * within `TAG_PREFETCH_TIMEOUT_MS`, so the System's first paint already
+   * has its real wedges instead of settling into them a moment later (see
+   * `TAG_PREFETCH_TIMEOUT_MS`). Nodes the cap cuts off keep going in the
+   * background — the `if (node.tag) return` in `loadEnrichment` skips
+   * whatever already resolved here, and whatever's left still lands
+   * through the normal lazy path.
+   */
+  async function prefetchTags(nodes: ExploreNode[]): Promise<void> {
+    const pending = nodes.filter((n) => !n.tag);
+    if (!pending.length) return;
+    // A straggler that resolves after the cap must *not* still set `n.tag`
+    // once this function has moved on: `loadEnrichment`'s own tag fetch
+    // skips any node that already has one, so a late write here with
+    // nothing to trigger a relayout behind it would leave that node
+    // silently stuck in the wrong wedge forever, worse off than if this
+    // function had never touched it.
+    let timedOut = false;
+    const fetches = Promise.all(
+      pending.map(async (n) => {
+        const tags = await api.tags(n.name, { urgent: true }).catch(() => []);
+        if (tags.length && !timedOut) n.tag = tags[0];
+      }),
+    );
+    await Promise.race([fetches, new Promise<void>((resolve) => setTimeout(resolve, TAG_PREFETCH_TIMEOUT_MS))]);
+    timedOut = true;
   }
 
   /**
