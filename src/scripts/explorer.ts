@@ -865,7 +865,7 @@ export function startExplorer(host: ExplorerHost): Explorer {
 
     let similar: api.SimilarArtist[];
     try {
-      similar = await api.similar(anchorName);
+      similar = await api.similar(anchorName, { urgent: true });
     } catch {
       // §22 — a failed lookup never takes the exploration down with it.
       if (dead || token !== hop) return;
@@ -932,8 +932,13 @@ export function startExplorer(host: ExplorerHost): Explorer {
 
     // Same partition `layoutSystem` used internally to place the points
     // above, kept here so the wedges drawn behind them can match exactly
-    // instead of being re-derived from wherever the nodes end up.
-    fromTagArcs = new Map(tagArcs.map((a) => [a.tag, a]));
+    // instead of being re-derived from wherever the nodes end up. Snapshots
+    // where each wedge *currently* is, mid-transition or not — the same
+    // reason `currentPos` exists for nodes: using the stale, already-final
+    // `tagArcs` here instead snapped every wedge back to its last target
+    // before re-easing from there, every time a hop or a piece of
+    // enrichment retriggered a layout while a wedge was still moving.
+    fromTagArcs = currentTagArcs();
     const counts = new Map<string, number>();
     for (const node of layoutNodes) {
       const key = node.tag ?? UNTAGGED;
@@ -958,6 +963,36 @@ export function startExplorer(host: ExplorerHost): Explorer {
     transition = reducedMotion() ? 1 : 0;
     transitionFrom = performance.now();
     draw();
+  }
+
+  /**
+   * Where each of *this* System's wedges visually is right now, blending
+   * `tagArcs` toward `fromTagArcs` the same way `currentWedges` does for
+   * drawing — called just before both are overwritten by a new layout, so
+   * the outgoing shape it captures is the one actually on screen instead of
+   * whatever the previous transition was heading towards. A tag that's
+   * mid-fade-out (in `fromTagArcs` but not the current `tagArcs`) keeps its
+   * last real position; reappearing inside the same brief window it's
+   * still fading is rare enough not to chase.
+   */
+  function currentTagArcs(): Map<string, TagArc> {
+    const t = easeOut(clamp((performance.now() - transitionFrom) / TRANSITION_MS, 0, 1));
+    const out = new Map<string, TagArc>();
+    for (const arc of tagArcs) {
+      if (arc.tag === UNTAGGED) continue;
+      const from = fromTagArcs.get(arc.tag);
+      out.set(
+        arc.tag,
+        from && t < 1
+          ? {
+              tag: arc.tag,
+              start: from.start + (arc.start - from.start) * t,
+              end: from.end + (arc.end - from.end) * t,
+            }
+          : arc,
+      );
+    }
+    return out;
   }
 
   /**
@@ -1269,7 +1304,7 @@ export function startExplorer(host: ExplorerHost): Explorer {
     const pool = system.overflow.filter((n) => !n.tag).slice(0, FOCUS_LIMIT);
     await Promise.all(
       pool.map(async (n) => {
-        const tags = await api.tags(n.name).catch(() => []);
+        const tags = await api.tags(n.name, { urgent: true }).catch(() => []);
         if (tags.length) n.tag = tags[0];
       }),
     );
@@ -1301,7 +1336,7 @@ export function startExplorer(host: ExplorerHost): Explorer {
     const found = new Map<string, ExploreNode>();
     await Promise.all(
       seeds.map(async (seedName) => {
-        const list = await api.similar(seedName).catch(() => []);
+        const list = await api.similar(seedName, { urgent: true }).catch(() => []);
         for (const entry of list.slice(0, 20)) {
           const key = norm(entry.name);
           if (!key || shown.has(key) || found.has(key)) continue;
@@ -1361,7 +1396,7 @@ export function startExplorer(host: ExplorerHost): Explorer {
             // every time a System's artwork was new — exactly the dropped
             // frames review reported ("doesn't happen once it's loaded").
             if (images.has(key)) return;
-            const url = node.image || (await api.artwork(node.name).catch(() => ""));
+            const url = node.image || (await api.artwork(node.name, { urgent: true }).catch(() => ""));
             if (dead || token !== hop || !url) return;
             const img = new Image();
             img.referrerPolicy = "no-referrer";
@@ -1377,13 +1412,13 @@ export function startExplorer(host: ExplorerHost): Explorer {
           })(),
           (async () => {
             if (node.listeners !== undefined) return;
-            const value = await api.listeners(node.name).catch(() => 0);
+            const value = await api.listeners(node.name, { urgent: true }).catch(() => 0);
             if (dead || token !== hop) return;
             applyListeners(node, value);
           })(),
           (async () => {
             if (node.tag) return;
-            const found = await api.tags(node.name).catch(() => []);
+            const found = await api.tags(node.name, { urgent: true }).catch(() => []);
             if (dead || token !== hop || !found.length) return;
             applyTag(node, found[0]);
           })(),

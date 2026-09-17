@@ -42,13 +42,32 @@ export interface SimilarArtist {
 /* ─── request pool ───────────────────────────────────────────────────── */
 
 type Job = () => Promise<void>;
-const pending: { job: Job; background: boolean }[] = [];
+/**
+ * "urgent" — Exploration Mode's own calls: whatever a visitor is looking at
+ * *right now*, gating a transition that is already on screen and animating.
+ * "normal" — the Galaxy's own foreground build (its top-artists list and
+ * similarity graph): the map is not usable without it, but nobody is
+ * actively staring at a spinner for it the way Exploration Mode's own
+ * anchor is waited on. "background" — tags and artwork, which only enrich
+ * something already usable.
+ *
+ * Without the top tier, opening Exploration Mode while the Galaxy's own
+ * ~300-artist similarity fetch was still mid-flight queued Exploration
+ * Mode's single, blocking `similar` call *behind* however much of that
+ * backlog was still pending — a shared pool with only two tiers can't tell
+ * "the whole map is waiting on this" from "the one thing on screen right
+ * now is waiting on this", and it's the second one Exploration Mode always
+ * is (review — "it's like it's loading 2 to 3 times").
+ */
+type Priority = "urgent" | "normal" | "background";
+const PRIORITY_RANK: Record<Priority, number> = { urgent: 0, normal: 1, background: 2 };
+const pending: { job: Job; priority: Priority }[] = [];
 let active = 0;
 
-function schedule<T>(run: () => Promise<T>, background: boolean): Promise<T> {
+function schedule<T>(run: () => Promise<T>, priority: Priority): Promise<T> {
   return new Promise<T>((resolve, reject) => {
     pending.push({
-      background,
+      priority,
       job: () => run().then(resolve, reject),
     });
     pump();
@@ -57,10 +76,12 @@ function schedule<T>(run: () => Promise<T>, background: boolean): Promise<T> {
 
 function pump() {
   while (active < CONCURRENCY && pending.length) {
-    // Foreground work first: the map is not usable until similarity lands,
-    // whereas tags and artwork only enrich a map that already works.
-    let index = pending.findIndex((p) => !p.background);
-    if (index === -1) index = 0;
+    let index = 0;
+    for (let i = 1; i < pending.length; i++) {
+      if (PRIORITY_RANK[pending[i].priority] < PRIORITY_RANK[pending[index].priority]) {
+        index = i;
+      }
+    }
     const { job } = pending.splice(index, 1)[0];
     active++;
     job().finally(() => {
@@ -91,7 +112,7 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 async function call(
   params: Record<string, string>,
-  background: boolean,
+  priority: Priority,
 ): Promise<Record<string, unknown>> {
   return schedule(async () => {
     const query = new URLSearchParams({
@@ -133,7 +154,7 @@ async function call(
       if (!body) throw new LastFmError("Malformed response", 0);
       return body;
     }
-  }, background);
+  }, priority);
 }
 
 /** Last.fm returns a bare object rather than an array for single results. */
@@ -170,7 +191,7 @@ export async function topArtists(
         period,
         limit: String(Math.min(limit, 500)),
       },
-      false,
+      "normal",
     );
     const block = data.topartists as
       | { artist?: unknown; "@attr"?: { total?: string } }
@@ -196,7 +217,10 @@ export async function topArtists(
  * shared across every map drawn in this browser — this is the same answer
  * whoever is asking, which is what makes the cache worth having.
  */
-export async function similar(artist: string): Promise<SimilarArtist[]> {
+export async function similar(
+  artist: string,
+  { urgent = false }: { urgent?: boolean } = {},
+): Promise<SimilarArtist[]> {
   return cached("similar", artist, async () => {
     // A failure throws rather than resolving to an empty list: the two mean
     // very different things once exploration can travel to an artist on the
@@ -205,7 +229,7 @@ export async function similar(artist: string): Promise<SimilarArtist[]> {
     // an empty list would make a moment's trouble stick for a month.
     const data = await call(
       { method: "artist.getsimilar", artist, autocorrect: "1", limit: "100" },
-      false,
+      urgent ? "urgent" : "normal",
     );
     const block = data.similarartists as { artist?: unknown } | undefined;
     return list<{ name?: string; match?: string }>(block?.artist)
@@ -217,12 +241,19 @@ export async function similar(artist: string): Promise<SimilarArtist[]> {
   });
 }
 
-/** Top tags, used only to name the emergent groups. Background work. */
-export async function tags(artist: string): Promise<string[]> {
+/**
+ * Top tags, used to name the emergent groups (background work) and, in
+ * Exploration Mode, an artist's own style wedge (urgent: it's on screen
+ * right now, not enriching something already usable in the background).
+ */
+export async function tags(
+  artist: string,
+  { urgent = false }: { urgent?: boolean } = {},
+): Promise<string[]> {
   return cached("tags", artist, async () => {
     const data = await call(
       { method: "artist.gettoptags", artist, autocorrect: "1" },
-      true,
+      urgent ? "urgent" : "background",
     ).catch(() => null);
     if (!data) return [];
     const block = data.toptags as { tag?: unknown } | undefined;
@@ -240,11 +271,14 @@ export async function tags(artist: string): Promise<string[]> {
  * uses it for node size (EXP §7): background enrichment, fetched only for
  * artists actually on screen, exactly like artwork and tags below.
  */
-export async function listeners(artist: string): Promise<number> {
+export async function listeners(
+  artist: string,
+  { urgent = false }: { urgent?: boolean } = {},
+): Promise<number> {
   return cached("listeners", artist, async () => {
     const data = await call(
       { method: "artist.getinfo", artist, autocorrect: "1" },
-      true,
+      urgent ? "urgent" : "background",
     ).catch(() => null);
     if (!data) return 0;
     const block = data.artist as { stats?: { listeners?: string } } | undefined;
@@ -257,7 +291,10 @@ export async function listeners(artist: string): Promise<number> {
  * — every one of them is now the placeholder hash — so their most-played
  * album cover stands in. Background work: the map is fine without it.
  */
-export async function artwork(artist: string): Promise<string> {
+export async function artwork(
+  artist: string,
+  { urgent = false }: { urgent?: boolean } = {},
+): Promise<string> {
   return cached("art", artist, async () => {
     const data = await call(
       {
@@ -266,7 +303,7 @@ export async function artwork(artist: string): Promise<string> {
         autocorrect: "1",
         limit: "6",
       },
-      true,
+      urgent ? "urgent" : "background",
     ).catch(() => null);
     if (!data) return "";
     const block = data.topalbums as { album?: unknown } | undefined;
@@ -300,7 +337,7 @@ export async function weeklyChartList(user: string): Promise<ChartWeek[]> {
   return cached("charts", user, async () => {
     const data = await call(
       { method: "user.getweeklychartlist", user },
-      false,
+      "normal",
     );
     const block = data.weeklychartlist as { chart?: unknown } | undefined;
     return list<{ from?: string; to?: string }>(block?.chart)
@@ -330,7 +367,7 @@ export async function firstScrobble(user: string): Promise<number> {
   return cached("first", user, async () => {
     const head = await call(
       { method: "user.getrecenttracks", user, limit: "1" },
-      false,
+      "normal",
     ).catch(() => null);
     const attr = (
       head?.recenttracks as { "@attr"?: { totalPages?: string } } | undefined
@@ -345,7 +382,7 @@ export async function firstScrobble(user: string): Promise<number> {
         limit: "1",
         page: String(pages),
       },
-      false,
+      "normal",
     ).catch(() => null);
     const track = list<{ date?: { uts?: string } }>(
       (tail?.recenttracks as { track?: unknown } | undefined)?.track,
@@ -388,7 +425,7 @@ export async function weeklyArtistChart(
           from: String(week.from),
           to: String(week.to),
         },
-        true,
+        "background",
       );
       const block = data.weeklyartistchart as { artist?: unknown } | undefined;
       return list<{ name?: string; playcount?: string; url?: string }>(
